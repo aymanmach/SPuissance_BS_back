@@ -9,6 +9,8 @@ const SCHEMA = String(process.env.SOURCE_DB_SCHEMA || "dbo").trim();
 const REPLAY_BASE_DATE = new Date(String(SYNC_START_DATE).replace(" ", "T"));
 const SYNC_WRITE_THROUGH = String(process.env.SYNC_WRITE_THROUGH || "false") === "true";
 const SYNC_FLUSH_INTERVAL_MS = Math.max(1000, Number(process.env.SYNC_FLUSH_INTERVAL_MS || 5000));
+const SYNC_ERROR_LOG_COOLDOWN_MS = Math.max(5000, Number(process.env.SYNC_ERROR_LOG_COOLDOWN_MS || 60000));
+const SYNC_LOG_SOURCE = "SENSOR_SYNC";
 
 const TABLE_MAP = {
   A127: "A127_MC02",
@@ -24,8 +26,38 @@ const TABLE_MAP = {
 };
 
 const state = new Map();
+const syncErrorLogState = new Map();
 let started = false;
 let flushTimer = null;
+
+async function logSyncError(code, message) {
+  const capteurCode = String(code || "UNKNOWN");
+  const safeMessage = String(message || "Erreur sync inconnue");
+  const key = `${capteurCode}:${safeMessage}`;
+  const now = Date.now();
+  const lastAt = Number(syncErrorLogState.get(key) || 0);
+
+  if (now - lastAt < SYNC_ERROR_LOG_COOLDOWN_MS) {
+    return;
+  }
+
+  syncErrorLogState.set(key, now);
+
+  try {
+    await db.query(
+      `INSERT INTO logs_systeme (date, niveau, source, message, metadata)
+       VALUES (NOW(), 'ERROR', ?, ?, JSON_OBJECT('type', 'SYNC_ERROR', 'capteur_code', ?, 'raw_error', ?))`,
+      [
+        SYNC_LOG_SOURCE,
+        `Erreur sync capteur ${capteurCode}: ${safeMessage}`,
+        capteurCode,
+        safeMessage,
+      ]
+    );
+  } catch (error) {
+    console.error("Impossible d'ecrire log sync en base:", error.message);
+  }
+}
 
 function isValidSqlIdentifier(value) {
   return /^[A-Za-z0-9_]+$/.test(String(value || ""));
@@ -129,11 +161,13 @@ function startLoopForCapteur(capteurId) {
       await readNextValue(capteurId);
     } catch (error) {
       const updated = state.get(capteurId);
+      const errorMessage = error?.message || "Erreur inconnue";
       if (updated) {
-        updated.lastError = error.message;
+        updated.lastError = errorMessage;
         state.set(capteurId, updated);
       }
-      console.error(`Erreur sync capteur ${info.code}:`, error.message);
+      console.error(`Erreur sync capteur ${info.code}:`, errorMessage);
+      await logSyncError(info.code, errorMessage);
     }
   };
 

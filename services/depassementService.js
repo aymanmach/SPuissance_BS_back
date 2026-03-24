@@ -438,49 +438,45 @@ async function deleteDepassementManual(id, userId) {
   }
 }
 
-async function verifierEtEnregistrerDepassementAutomatique(pmcGlobale) {
+/**
+ * Enregistre un depassement automatique detecte par fenetre glissante.
+ *
+ * @param {Object} pmcGlobale   - Donnees PMC courantes (pmc_kw, puissance_souscrite, capteurs, etc.)
+ * @param {Date}   debutDepassement - Date exacte du debut du depassement continu (fournie par realtime.js)
+ */
+async function verifierEtEnregistrerDepassementAutomatique(pmcGlobale, debutDepassement) {
   if (!pmcGlobale) return { inserted: false, reason: "no-data" };
 
-  const minuteCourante = Number(pmcGlobale.minute_courante || 0);
-  const capteurs = Array.isArray(pmcGlobale.capteurs) ? pmcGlobale.capteurs : [];
-
-  // Une fenetre est complete si on a atteint la 10e minute ET au moins un capteur
-  // possede un nombre de points egal/superieur au nombre attendu dans la fenetre.
-  const hasCompleteCapteurWindow = capteurs.some((capteur) => {
-    const pointsFenetre = Number(capteur?.points_fenetre || 0);
-    const pointsAttendus = Number(capteur?.points_attendus || 0);
-    return pointsAttendus > 0 && pointsFenetre >= pointsAttendus;
-  });
-
-  if (minuteCourante < 10 || !hasCompleteCapteurWindow) {
-    return { inserted: false, reason: "window-not-complete" };
+  // debutDepassement est obligatoire : c'est la fenetre glissante qui decide quand appeler
+  if (!debutDepassement || !(debutDepassement instanceof Date) || Number.isNaN(debutDepassement.getTime())) {
+    return { inserted: false, reason: "missing-debut-depassement" };
   }
 
   const pmcKw = Number(pmcGlobale.pmc_kw || 0);
   const seuilKw = Number(pmcGlobale.puissance_souscrite || 0);
+
   if (!seuilKw || pmcKw < seuilKw) {
     return { inserted: false, reason: "below-threshold" };
   }
 
-  const windowStart = pmcGlobale.window_start;
-  const windowEnd = pmcGlobale.window_end;
-  if (!windowStart || !windowEnd) {
-    return { inserted: false, reason: "missing-window" };
+  const capteurs = Array.isArray(pmcGlobale.capteurs) ? pmcGlobale.capteurs : [];
+
+  // window_start = debut reel du depassement (fenetre glissante)
+  // window_end   = debut + 10 minutes - 1 seconde
+  const windowStartDate = debutDepassement;
+  const windowEndDate = new Date(windowStartDate.getTime() + (10 * 60 - 1) * 1000);
+
+  const windowStart = toSqlDateTime(windowStartDate);
+  const canonicalWindowEnd = toSqlDateTime(windowEndDate);
+
+  if (!windowStart || !canonicalWindowEnd) {
+    return { inserted: false, reason: "invalid-window" };
   }
 
-  const windowStartDate = new Date(String(windowStart).replace(" ", "T"));
-  if (Number.isNaN(windowStartDate.getTime())) {
-    return { inserted: false, reason: "invalid-window-start" };
-  }
+  // Tag unique base sur le debut reel du depassement (pas la grille fixe)
+  const autoTag = `AUTO | ${windowStart} | ${canonicalWindowEnd}`;
 
-  const canonicalWindowEndDate = new Date(windowStartDate.getTime() + ((10 * 60) - 1) * 1000);
-  const canonicalWindowEnd = toSqlDateTime(canonicalWindowEndDate);
-  if (!canonicalWindowEnd) {
-    return { inserted: false, reason: "invalid-window-end" };
-  }
-
-  const autoTag = `AUTO_10MIN|${windowStart}|${canonicalWindowEnd}`;
-
+  // Deduplication : eviter d'inserer deux fois le meme depassement
   const [existingRows] = await db.query(
     `SELECT id
      FROM depassements
@@ -493,9 +489,12 @@ async function verifierEtEnregistrerDepassementAutomatique(pmcGlobale) {
     return { inserted: false, reason: "already-recorded", id: existingRows[0].id };
   }
 
+  // Capteur principal = celui avec la pmc_kw la plus haute
   const capteursValides = capteurs.filter((capteur) => Number(capteur.pmc_kw || 0) > 0);
   const capteurPrincipal =
-    capteursValides.sort((a, b) => Number(b.pmc_kw || 0) - Number(a.pmc_kw || 0))[0] || capteurs[0] || null;
+    [...capteursValides].sort((a, b) => Number(b.pmc_kw || 0) - Number(a.pmc_kw || 0))[0] ||
+    capteurs[0] ||
+    null;
 
   if (!capteurPrincipal?.capteur_id) {
     return { inserted: false, reason: "no-capteur" };
@@ -510,11 +509,14 @@ async function verifierEtEnregistrerDepassementAutomatique(pmcGlobale) {
   );
   const usineId = usineRows[0]?.usine_id || null;
 
+  // La tranche est determinee a partir du debut reel du depassement
+  const tranche = getTrancheFromDateTime(windowStartDate);
+
   const connection = await db.getConnection();
   try {
     await connection.beginTransaction();
 
-    const description = `${autoTag} Depassement sur fenetre complete (${windowStart} -> ${canonicalWindowEnd})`;
+    const description = `${autoTag} Depassement glissant ( ${windowStart} ->  ${canonicalWindowEnd} )`;
     const [insertResult] = await connection.query(
       `INSERT INTO depassements (
         capteur_id, usine_id, date, tranche_horaire,
@@ -523,8 +525,8 @@ async function verifierEtEnregistrerDepassementAutomatique(pmcGlobale) {
       [
         Number(capteurPrincipal.capteur_id),
         usineId,
-        canonicalWindowEnd,
-        String(pmcGlobale.tranche_horaire || "HP"),
+        canonicalWindowEnd,          // date = fin de la fenetre
+        tranche,
         Number(pmcGlobale.pa_i_kw || 0),
         pmcKw,
         seuilKw,

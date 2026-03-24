@@ -259,16 +259,94 @@ async function getPaiEvolutionParCapteur(debut, fin, allowedUsines = []) {
   }));
 }
 
+async function getPmcEvolutionGlobale(debut, fin, allowedUsines = []) {
+  const { joinClause, whereClause, params } = buildUsineFilter("c", allowedUsines);
+  const [rows] = await db.query(
+    `SELECT t.minute_bucket AS date,
+            SUM(t.avg_pmc_kw) AS pmc_kw,
+            SUM(t.avg_pa_i_kw) AS pa_i_kw
+     FROM (
+       SELECT DATE_FORMAT(m.date, '%Y-%m-%d %H:%i:00') AS minute_bucket,
+              m.capteur_id,
+              AVG(m.pa_i) AS avg_pmc_kw,
+              AVG(m.pa_i) AS avg_pa_i_kw
+       FROM mesures m
+       JOIN capteurs c ON c.id = m.capteur_id
+       ${joinClause}
+       WHERE c.actif = TRUE
+         ${whereClause}
+         AND m.date BETWEEN ? AND ?
+         AND m.pa_i > 0
+         AND m.pa_i <= ?
+       GROUP BY DATE_FORMAT(m.date, '%Y-%m-%d %H:%i:00'), m.capteur_id
+     ) t
+     GROUP BY t.minute_bucket
+     ORDER BY t.minute_bucket ASC`,
+    [...params, debut, fin, MAX_VALID_PAI_KW]
+  );
+
+  const subscribedByTranche = {
+    HC: await getTotalSubscribedPowerByTranche("HC", allowedUsines),
+    HP: await getTotalSubscribedPowerByTranche("HP", allowedUsines),
+    HPO: await getTotalSubscribedPowerByTranche("HPO", allowedUsines),
+  };
+
+  return rows.map((row) => {
+    const tranche = detectTrancheByDate(row.date);
+    const subscribed = Number(subscribedByTranche[tranche] || 0);
+    const pmcKw = Number(row.pmc_kw || 0);
+
+    return {
+      date: row.date,
+      pmc_kw: pmcKw,
+      pa_i_kw: Number(row.pa_i_kw || 0),
+      pourcentage: subscribed ? (pmcKw / subscribed) * 100 : 0,
+      tranche_horaire: tranche,
+    };
+  });
+}
+
+async function getPmcEvolutionParCapteur(debut, fin, allowedUsines = []) {
+  const { joinClause, whereClause, params } = buildUsineFilter("c", allowedUsines);
+  const [rows] = await db.query(
+    `SELECT DATE_FORMAT(m.date, '%Y-%m-%d %H:%i:00') AS date,
+            c.code AS capteur_code,
+            AVG(m.pa_i) AS pmc_kw
+     FROM mesures m
+     JOIN capteurs c ON c.id = m.capteur_id
+     ${joinClause}
+     WHERE c.actif = TRUE
+       ${whereClause}
+       AND m.date BETWEEN ? AND ?
+       AND m.pa_i > 0
+       AND m.pa_i <= ?
+     GROUP BY DATE_FORMAT(m.date, '%Y-%m-%d %H:%i:00'), c.code
+     ORDER BY date ASC, c.code ASC`,
+    [...params, debut, fin, MAX_VALID_PAI_KW]
+  );
+
+  return rows.map((row) => ({
+    date: row.date,
+    capteur_code: row.capteur_code,
+    pmc_kw: Number(row.pmc_kw || 0),
+  }));
+}
+
 async function getPmcCouranteGlobale(allowedUsines = []) {
   const virtualNow = await getRealSyncNow(allowedUsines);
   const virtualNowSql = toSqlDateTime(virtualNow);
   const { windowStart, windowEnd, minuteCourante, secondeCourante } = getCurrentTenMinuteWindowReal(virtualNow);
-  const windowStartSql = toSqlDateTime(windowStart);
-  const windowEndSql = toSqlDateTime(windowEnd);
   const trancheNow = detectTrancheByDate(virtualNow);
 
+  // Fenetre GLISSANTE : toujours les 10 dernieres minutes depuis virtualNow
+  // Evite l'effondrement de pmc_kw au changement de fenetre fixe (ex: 12:40:00)
+  // car la fenetre fixe ne contient alors qu'1 seconde de donnees
+  const rollingWindowStart = new Date(virtualNow.getTime() - PMC_WINDOW_SECONDS * 1000);
+  const rollingWindowStartSql = toSqlDateTime(rollingWindowStart);
+  const windowEndSql = toSqlDateTime(windowEnd);
+
   const currentRows = await getLatestMeasurePerCapteur(virtualNowSql, allowedUsines);
-  const windowRows = await getWindowMeasuresByCapteur(windowStartSql, windowEndSql, allowedUsines);
+  const windowRows = await getWindowMeasuresByCapteur(rollingWindowStartSql, windowEndSql, allowedUsines);
 
   const queuesByCapteur = new Map();
   for (const row of windowRows) {
@@ -479,6 +557,8 @@ module.exports = {
   getPaiEvolutionGlobale,
   getPaiEvolutionParCapteur,
   getPmcCouranteGlobale,
+  getPmcEvolutionGlobale,
+  getPmcEvolutionParCapteur,
   getPmcEvolutionCurrentWindow,
   getPmcEvolutionParCapteurCurrentWindow,
 };
