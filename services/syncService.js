@@ -49,9 +49,7 @@ async function logSyncError(code, message) {
        VALUES (NOW(), 'ERROR', ?, ?, JSON_OBJECT('type', 'SYNC_ERROR', 'capteur_code', ?, 'raw_error', ?))`,
       [
         SYNC_LOG_SOURCE,
-        `Erreur sync capteur ${capteurCode}: ${safeMessage}`,
-        capteurCode,
-        safeMessage,
+        `Erreur sync capteur ${capteurCode}: ${safeMessage}`
       ]
     );
   } catch (error) {
