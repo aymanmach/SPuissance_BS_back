@@ -516,7 +516,7 @@ async function verifierEtEnregistrerDepassementAutomatique(pmcGlobale, debutDepa
   try {
     await connection.beginTransaction();
 
-    const description = `${autoTag} Depassement glissant ( ${windowStart} ->  ${canonicalWindowEnd} )`;
+    const description = `${autoTag} Depassement  ( ${windowStart} ->  ${canonicalWindowEnd} )`;
     const [insertResult] = await connection.query(
       `INSERT INTO depassements (
         capteur_id, usine_id, date, tranche_horaire,
@@ -667,6 +667,31 @@ async function getDepassementsStatistiques(allowedUsines = []) {
   return stats[0] || {};
 }
 
+async function getDepassementsMaxParTranche(debut, fin, allowedUsines = []) {
+  const { joinClause, whereClause, params } = buildDepassementUsineFilter(allowedUsines);
+  const [rows] = await db.query(
+    `SELECT d.tranche_horaire,
+            MAX(d.pa_i_kw) AS max_pa_i_kw,
+            AVG(d.pa_i_kw) AS avg_pa_i_kw,
+            COUNT(*) AS points_count
+     FROM depassements d
+     ${joinClause}
+     WHERE d.date BETWEEN ? AND ?
+       ${whereClause}
+       AND d.tranche_horaire IN ('HC', 'HP', 'HPO')
+     GROUP BY d.tranche_horaire
+     ORDER BY d.tranche_horaire ASC`,
+    [debut, fin, ...params]
+  );
+
+  return rows.map((row) => ({
+    tranche_horaire: row.tranche_horaire,
+    max_pa_i_kw: Number(row.max_pa_i_kw || 0),
+    avg_pa_i_kw: Number(row.avg_pa_i_kw || 0),
+    points_count: Number(row.points_count || 0),
+  }));
+}
+
 module.exports = {
   getDepassementsSynthese,
   getDepassementsList,
@@ -674,6 +699,7 @@ module.exports = {
   getDepassementsParCapteur,
   getDepassementsPivot,
   getDepassementsStatistiques,
+  getDepassementsMaxParTranche,
   createDepassementManual,
   updateDepassementManual,
   deleteDepassementManual,

@@ -8,6 +8,7 @@ const {
   getDepassementsParCapteur,
   getDepassementsPivot,
   getDepassementsStatistiques,
+  getDepassementsMaxParTranche,
   createDepassementManual,
   updateDepassementManual,
   deleteDepassementManual,
@@ -36,6 +37,21 @@ function resolveUsineScope(req) {
   }
 
   return { ok: true, usines: [requestedUsine] };
+}
+
+function validateDateRange(debut, fin) {
+  const debutDate = new Date(String(debut));
+  const finDate = new Date(String(fin));
+
+  if (Number.isNaN(debutDate.getTime()) || Number.isNaN(finDate.getTime())) {
+    return { valid: false, message: "Format de date invalide" };
+  }
+
+  if (finDate < debutDate) {
+    return { valid: false, message: "La date de fin doit etre superieure a la date de debut" };
+  }
+
+  return { valid: true };
 }
 
 router.get(
@@ -168,6 +184,30 @@ router.delete(
 );
 
 // 📊 Nouvelles routes statistiques
+router.get(
+  "/stats/max-par-tranche",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { debut, fin } = req.query;
+    if (!debut || !fin) {
+      return res.status(400).json({ message: "Parametres debut et fin obligatoires" });
+    }
+
+    const validation = validateDateRange(debut, fin);
+    if (!validation.valid) {
+      return res.status(400).json({ message: validation.message });
+    }
+
+    const scope = resolveUsineScope(req);
+    if (!scope.ok) {
+      return res.status(scope.status).json({ message: scope.message });
+    }
+
+    const rows = await getDepassementsMaxParTranche(debut, fin, scope.usines);
+    res.json(rows);
+  })
+);
+
 router.get(
   "/stats/par-jour",
   requireAuth,

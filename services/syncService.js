@@ -10,6 +10,12 @@ const REPLAY_BASE_DATE = new Date(String(SYNC_START_DATE).replace(" ", "T"));
 const SYNC_WRITE_THROUGH = String(process.env.SYNC_WRITE_THROUGH || "false") === "true";
 const SYNC_FLUSH_INTERVAL_MS = Math.max(1000, Number(process.env.SYNC_FLUSH_INTERVAL_MS || 5000));
 const SYNC_ERROR_LOG_COOLDOWN_MS = Math.max(5000, Number(process.env.SYNC_ERROR_LOG_COOLDOWN_MS || 60000));
+const SYNC_SENSOR_ERROR_BACKOFF_MS = Math.max(1000, Number(process.env.SYNC_SENSOR_ERROR_BACKOFF_MS || 15000));
+const SYNC_SENSOR_ERROR_BACKOFF_MAX_MS = Math.max(
+  SYNC_SENSOR_ERROR_BACKOFF_MS,
+  Number(process.env.SYNC_SENSOR_ERROR_BACKOFF_MAX_MS || 300000)
+);
+const SYNC_SOURCE_LOOKBACK_SECONDS = Math.max(1, Number(process.env.SYNC_SOURCE_LOOKBACK_SECONDS || 600));
 const SYNC_LOG_SOURCE = "SENSOR_SYNC";
 
 const TABLE_MAP = {
@@ -49,7 +55,9 @@ async function logSyncError(code, message) {
        VALUES (NOW(), 'ERROR', ?, ?, JSON_OBJECT('type', 'SYNC_ERROR', 'capteur_code', ?, 'raw_error', ?))`,
       [
         SYNC_LOG_SOURCE,
-        `Erreur sync capteur ${capteurCode}: ${safeMessage}`
+        `Erreur sync capteur ${capteurCode}: ${safeMessage}`,
+        capteurCode,
+        safeMessage,
       ]
     );
   } catch (error) {
@@ -83,11 +91,7 @@ async function initSync() {
 
   started = true;
   console.log("Demarrage synchronisation SQL Server -> MySQL...");
-
-  await db.query("SET FOREIGN_KEY_CHECKS = 0");
-  await db.query("TRUNCATE TABLE mesures");
-  await db.query("SET FOREIGN_KEY_CHECKS = 1");
-  console.log("Table mesures videe");
+  console.log("Conservation des donnees existantes dans la table mesures");
 
   const [capteurs] = await db.query(
     `SELECT id, code, frequence_secondes
@@ -114,6 +118,9 @@ async function initSync() {
       timer: null,
       done: false,
       lastError: null,
+      inFlight: false,
+      retryAt: 0,
+      consecutiveErrors: 0,
     });
   }
 
@@ -155,17 +162,52 @@ function startLoopForCapteur(capteurId) {
   const intervalMs = info.frequenceSecondes * 1000;
 
   const tick = async () => {
+    const snapshot = state.get(capteurId);
+    if (!snapshot || snapshot.done) {
+      return;
+    }
+
+    if (snapshot.inFlight) {
+      return;
+    }
+
+    const now = Date.now();
+    if (snapshot.retryAt && now < snapshot.retryAt) {
+      return;
+    }
+
+    snapshot.inFlight = true;
+    state.set(capteurId, snapshot);
+
     try {
       await readNextValue(capteurId);
+      const updated = state.get(capteurId);
+      if (updated) {
+        updated.consecutiveErrors = 0;
+        updated.retryAt = 0;
+        state.set(capteurId, updated);
+      }
     } catch (error) {
       const updated = state.get(capteurId);
       const errorMessage = error?.message || "Erreur inconnue";
       if (updated) {
         updated.lastError = errorMessage;
+        updated.consecutiveErrors = Number(updated.consecutiveErrors || 0) + 1;
+        const backoffMs = Math.min(
+          SYNC_SENSOR_ERROR_BACKOFF_MAX_MS,
+          SYNC_SENSOR_ERROR_BACKOFF_MS * Math.pow(2, Math.max(0, updated.consecutiveErrors - 1))
+        );
+        updated.retryAt = Date.now() + backoffMs;
         state.set(capteurId, updated);
       }
       console.error(`Erreur sync capteur ${info.code}:`, errorMessage);
       await logSyncError(info.code, errorMessage);
+    } finally {
+      const updated = state.get(capteurId);
+      if (updated) {
+        updated.inFlight = false;
+        state.set(capteurId, updated);
+      }
     }
   };
 
@@ -185,7 +227,7 @@ async function readNextValue(capteurId) {
   }
 
   const projectedSourceDate = buildProjectedSourceDate();
-  const toleranceMs = Math.max(1000, info.frequenceSecondes * 1000);
+  const toleranceMs = Math.max(1000, SYNC_SOURCE_LOOKBACK_SECONDS * 1000);
   const lowerBound = new Date(projectedSourceDate.getTime() - toleranceMs);
 
   const pool = await getSourcePool();
@@ -208,22 +250,6 @@ async function readNextValue(capteurId) {
     .query(query);
 
   if (!result.recordset.length) {
-    result = await pool
-      .request()
-      .input("projectedSourceDate", sql.DateTime, projectedSourceDate)
-      .input("maxPai", sql.Decimal(12, 3), MAX_VALID_PAI)
-      .query(`
-        SELECT TOP 1 [date], [PA_I]
-        FROM [${SCHEMA}].[${info.tableSource}]
-        WHERE [date] <= @projectedSourceDate
-          AND [PA_I] IS NOT NULL
-          AND [PA_I] >= 0
-          AND (@maxPai <= 0 OR [PA_I] <= @maxPai)
-        ORDER BY [date] DESC
-      `);
-  }
-
-  if (!result.recordset.length) {
     info.lastError = `Aucune donnee source <= ${projectedSourceDate.toISOString()}`;
     state.set(capteurId, info);
     return;
@@ -231,7 +257,8 @@ async function readNextValue(capteurId) {
 
   const row = result.recordset[0];
   const rowDate = new Date(row.date);
-  const tranche = detectTrancheByDate(rowDate);
+  const mesureDate = new Date();
+  const tranche = detectTrancheByDate(mesureDate);
 
   if (info.lastSourceDate && String(info.lastSourceDate) === String(rowDate)) {
     info.cursor = projectedSourceDate;
@@ -245,7 +272,7 @@ async function readNextValue(capteurId) {
   info.lastError = null;
   info.buffer.push([
     info.capteurId,
-    rowDate,
+    mesureDate,
     Number(row.PA_I),
     tranche,
     "OK",
@@ -328,6 +355,8 @@ function getSyncStatus() {
     frequence_sec: info.frequenceSecondes,
     done: info.done,
     last_error: info.lastError,
+    retry_at: info.retryAt ? new Date(info.retryAt).toISOString() : null,
+    consecutive_errors: Number(info.consecutiveErrors || 0),
   }));
 }
 
