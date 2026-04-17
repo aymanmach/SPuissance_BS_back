@@ -15,12 +15,28 @@ dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
+const inProd = process.env.NODE_ENV === "production";
 
 const sessionMiddleware = buildSessionMiddleware();
+const allowedOrigins = String(process.env.CORS_ALLOWED_ORIGINS || process.env.FRONTEND_URL || "http://localhost:5173")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
 app.use(
   cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:5173",
+    origin(origin, callback) {
+      if (!inProd) {
+        return callback(null, true);
+      }
+      if (!origin) {
+        return callback(null, true);
+      }
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error("Origin non autorisee"));
+    },
     credentials: true,
   })
 );
@@ -41,7 +57,7 @@ app.use("/api", apiRoutes);
 app.use(notFoundHandler);
 app.use(errorHandler);
 
-initWebSocket(server, sessionMiddleware);
+initWebSocket(server, sessionMiddleware, allowedOrigins);
 
 async function start() {
   try {

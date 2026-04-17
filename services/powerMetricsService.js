@@ -108,6 +108,8 @@ async function getLatestMeasurePerCapteur(virtualNowSql, allowedUsines = []) {
     `SELECT c.id AS capteur_id,
             c.code,
             c.nom,
+            us_data.code AS usine_code,
+            us_data.nom AS usine_nom,
             COALESCE(c.frequence_secondes, 60) AS frequence_secondes,
             c.puissance_souscrite_hc,
             c.puissance_souscrite_hp,
@@ -116,6 +118,7 @@ async function getLatestMeasurePerCapteur(virtualNowSql, allowedUsines = []) {
             m.pa_i,
             m.tranche_horaire
      FROM capteurs c
+     LEFT JOIN usines us_data ON us_data.id = c.usine_id
      LEFT JOIN (
        SELECT m1.*
        FROM mesures m1
@@ -180,6 +183,8 @@ async function getPaiCouranteGlobale(allowedUsines = []) {
       capteur_id: Number(row.capteur_id),
       code: row.code,
       nom: row.nom,
+      usine_code: row.usine_code,
+      usine_nom: row.usine_nom,
       date: row.date || virtualNowSql,
       pa_i: pai,
       tranche_horaire: trancheNow,
@@ -373,6 +378,8 @@ async function getPmcCouranteGlobale(allowedUsines = []) {
       capteur_id: Number(row.capteur_id),
       code: row.code,
       nom: row.nom,
+      usine_code: row.usine_code,
+      usine_nom: row.usine_nom,
       frequence_secondes: Number(row.frequence_secondes || 60),
       date: row.date || virtualNowSql,
       pa_i_kw: pai,

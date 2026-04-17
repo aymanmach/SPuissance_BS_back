@@ -52,22 +52,40 @@ async function getOrBuildPayload() {
 function emitAlertIfNeeded(io, payload) {
   const pai = Number(payload?.pai?.valeur || 0);
   const ps = Number(payload?.pai?.ps || 0);
+  const dateIso = new Date(payload?.ts || Date.now()).toISOString();
+  const principalCapteur = Array.isArray(payload?.pai?.capteurs) ? payload.pai.capteurs[0] : null;
+  const capteurId = Number(principalCapteur?.capteur_id || 0);
+  const usineCode = String(principalCapteur?.usine_code || "").toUpperCase();
+  const usineNom = principalCapteur?.usine_nom || null;
+  const target = usineCode ? io.to(`usine-${usineCode}`) : io;
 
   if (!ps) {
     return;
   }
 
   if (pai >= ps) {
-    io.emit("alerte", {
-      niveau: "ERROR",
-      message: `Depassement detecte: +${(pai - ps).toFixed(2)} kW`,
+    target.emit("alerte", {
+      type: "alerte",
+      capteur_id: capteurId,
+      valeur: pai,
+      seuil: ps,
+      usine_code: usineCode || null,
+      usine_nom: usineNom,
+      timestamp: dateIso,
+      message: "Depassement detecte pendant 5 minutes",
     });
     return;
   }
 
   if (pai >= ps * 0.95) {
-    io.emit("alerte", {
-      niveau: "WARNING",
+    target.emit("alerte", {
+      type: "alerte",
+      capteur_id: capteurId,
+      valeur: pai,
+      seuil: ps,
+      usine_code: usineCode || null,
+      usine_nom: usineNom,
+      timestamp: dateIso,
       message: `Seuil proche: ${Number(payload?.pai?.pourcentage || 0).toFixed(2)}% de la puissance souscrite`,
     });
   }
@@ -173,10 +191,10 @@ function startGlobalTicker(io) {
   }, PUSH_INTERVAL_MS);
 }
 
-function initWebSocket(server, sessionMiddleware) {
+function initWebSocket(server, sessionMiddleware, allowedOrigins = ["http://localhost:5173"]) {
   const io = new Server(server, {
     cors: {
-      origin: process.env.FRONTEND_URL || "http://localhost:5173",
+      origin: allowedOrigins,
       credentials: true,
     },
   });
@@ -190,6 +208,12 @@ function initWebSocket(server, sessionMiddleware) {
     const user = socket.user;
 
     socket.join(`user-${user.id}`);
+    for (const usineCode of Array.isArray(user?.usines) ? user.usines : []) {
+      const normalized = String(usineCode || "").trim().toUpperCase();
+      if (normalized) {
+        socket.join(`usine-${normalized}`);
+      }
+    }
     if (user.role === ROLES.ADMIN) {
       socket.join("admins");
     }

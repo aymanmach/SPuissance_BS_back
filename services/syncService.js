@@ -16,6 +16,10 @@ const SYNC_SENSOR_ERROR_BACKOFF_MAX_MS = Math.max(
   Number(process.env.SYNC_SENSOR_ERROR_BACKOFF_MAX_MS || 300000)
 );
 const SYNC_SOURCE_LOOKBACK_SECONDS = Math.max(1, Number(process.env.SYNC_SOURCE_LOOKBACK_SECONDS || 600));
+const SYNC_SOURCE_LOOKBACK_FALLBACK_SECONDS = Math.max(
+  SYNC_SOURCE_LOOKBACK_SECONDS,
+  Number(process.env.SYNC_SOURCE_LOOKBACK_FALLBACK_SECONDS || 86400)
+);
 const SYNC_LOG_SOURCE = "SENSOR_SYNC";
 
 const TABLE_MAP = {
@@ -29,7 +33,67 @@ const TABLE_MAP = {
   A147: "A147_MC02",
   A148: "A148_MC02",
   A150: "A150_MC02",
+  A157: "A127_MC02",
+  A151: "A150_MC02",
 };
+
+function normalizeCapteurCode(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function normalizeSourceTableName(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  // Accepte les formats: A150_MC02, dbo.A150_MC02, [dbo].[A150_MC02]
+  const unwrapped = raw.replace(/[\[\]]/g, "");
+  const parts = unwrapped.split(".");
+  const tableName = String(parts[parts.length - 1] || "").trim();
+
+  if (!tableName) {
+    return null;
+  }
+
+  return tableName.toUpperCase();
+}
+
+function resolveSourceTableForCode(code) {
+  const normalizedCode = normalizeCapteurCode(code);
+  if (!normalizedCode) {
+    return null;
+  }
+
+  const baseCode = normalizedCode.endsWith("_MC02")
+    ? normalizedCode.slice(0, -"_MC02".length)
+    : normalizedCode;
+
+  // Priorite au mapping explicite pour les cas particuliers.
+  if (TABLE_MAP[normalizedCode]) {
+    return TABLE_MAP[normalizedCode];
+  }
+
+  if (TABLE_MAP[baseCode]) {
+    return TABLE_MAP[baseCode];
+  }
+
+  if (normalizedCode.endsWith("_MC02")) {
+    return isValidSqlIdentifier(normalizedCode) ? normalizedCode : null;
+  }
+
+  const inferredTable = `${normalizedCode}_MC02`;
+  return isValidSqlIdentifier(inferredTable) ? inferredTable : null;
+}
+
+function resolveSourceTableForCapteur(capteur) {
+  const explicitTable = normalizeSourceTableName(capteur?.table_source);
+  if (explicitTable && isValidSqlIdentifier(explicitTable)) {
+    return explicitTable;
+  }
+
+  return resolveSourceTableForCode(capteur?.code);
+}
 
 const state = new Map();
 const syncErrorLogState = new Map();
@@ -94,7 +158,7 @@ async function initSync() {
   console.log("Conservation des donnees existantes dans la table mesures");
 
   const [capteurs] = await db.query(
-    `SELECT id, code, frequence_secondes
+    `SELECT id, code, frequence_secondes, table_source
      FROM capteurs
      WHERE actif = TRUE
      ORDER BY id ASC`
@@ -106,10 +170,16 @@ async function initSync() {
   }
 
   for (const capteur of capteurs) {
-    const tableSource = TABLE_MAP[String(capteur.code || "").toUpperCase()] || null;
+    const normalizedCode = normalizeCapteurCode(capteur.code);
+    const tableSource = resolveSourceTableForCapteur(capteur);
+    if (tableSource) {
+      console.log(
+        `[SYNC] Capteur ${normalizedCode} -> table source ${tableSource}${capteur.table_source ? " (capteurs.table_source)" : " (mapping/fallback)"}`
+      );
+    }
     state.set(Number(capteur.id), {
       capteurId: Number(capteur.id),
-      code: String(capteur.code || ""),
+      code: normalizedCode || String(capteur.code || ""),
       tableSource,
       frequenceSecondes: Math.max(1, Number(capteur.frequence_secondes || 60)),
       cursor: buildProjectedSourceDate(),
@@ -248,6 +318,19 @@ async function readNextValue(capteurId) {
     .input("lowerBound", sql.DateTime, lowerBound)
     .input("maxPai", sql.Decimal(12, 3), MAX_VALID_PAI)
     .query(query);
+
+  // Fallback borne: certaines tables source n'ont pas de point dans la fenetre courte.
+  if (!result.recordset.length && SYNC_SOURCE_LOOKBACK_FALLBACK_SECONDS > SYNC_SOURCE_LOOKBACK_SECONDS) {
+    const fallbackToleranceMs = Math.max(1000, SYNC_SOURCE_LOOKBACK_FALLBACK_SECONDS * 1000);
+    const fallbackLowerBound = new Date(projectedSourceDate.getTime() - fallbackToleranceMs);
+
+    result = await pool
+      .request()
+      .input("projectedSourceDate", sql.DateTime, projectedSourceDate)
+      .input("lowerBound", sql.DateTime, fallbackLowerBound)
+      .input("maxPai", sql.Decimal(12, 3), MAX_VALID_PAI)
+      .query(query);
+  }
 
   if (!result.recordset.length) {
     info.lastError = `Aucune donnee source <= ${projectedSourceDate.toISOString()}`;
