@@ -22,6 +22,11 @@ const SYNC_SOURCE_LOOKBACK_FALLBACK_SECONDS = Math.max(
 );
 const SYNC_LOG_SOURCE = "SENSOR_SYNC";
 
+function isEnvTrue(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on";
+}
+
 const TABLE_MAP = {
   A127: "A127_MC02",
   A137: "A137_MC02",
@@ -144,8 +149,10 @@ async function initSync() {
     return;
   }
 
-  if (String(process.env.SYNC_ENABLED || "false") !== "true") {
-    console.log("Sync desactivee (SYNC_ENABLED != true)");
+  if (!isEnvTrue(process.env.SYNC_ENABLED)) {
+    const rawValue = process.env.SYNC_ENABLED;
+    const displayValue = rawValue == null ? "undefined" : JSON.stringify(String(rawValue));
+    console.log(`Sync desactivee (SYNC_ENABLED=${displayValue})`);
     return;
   }
 

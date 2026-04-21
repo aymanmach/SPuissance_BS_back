@@ -6,6 +6,34 @@ const { requireRole, ROLES } = require("../middlewares/auth");
 
 const router = express.Router();
 
+const ROLE_LABELS = {
+  [ROLES.ADMIN]: "Administrateur",
+  [ROLES.SUPERVISEUR_LAC]: "Superviseur LAC",
+  [ROLES.SUPERVISEUR_ACIERIE]: "Superviseur ACIERIE",
+  [ROLES.SUPERVISEUR_ENERGIE]: "Superviseur Energie",
+  [ROLES.SUPERVISEUR_LAF]: "Superviseur LAF",
+};
+
+async function resolveRoleId(connection, roleCode) {
+  const [[roleRow]] = await connection.query(`SELECT id FROM roles WHERE code = ? LIMIT 1`, [roleCode]);
+  if (roleRow) {
+    return Number(roleRow.id);
+  }
+
+  const label = ROLE_LABELS[roleCode];
+  if (!label) {
+    return null;
+  }
+
+  const [insertRole] = await connection.query(
+    `INSERT INTO roles (code, libelle) VALUES (?, ?)
+     ON DUPLICATE KEY UPDATE libelle = VALUES(libelle)`,
+    [roleCode, label]
+  );
+
+  return Number(insertRole.insertId || 0) || null;
+}
+
 function normalizeUsineCodes(usines = []) {
   if (!Array.isArray(usines)) return [];
   const normalized = usines
@@ -90,8 +118,8 @@ router.post(
     try {
       await connection.beginTransaction();
 
-      const [[roleRow]] = await connection.query(`SELECT id FROM roles WHERE code = ? LIMIT 1`, [role]);
-      if (!roleRow) {
+      const roleId = await resolveRoleId(connection, role);
+      if (!roleId) {
         await connection.rollback();
         return res.status(400).json({ message: "Role invalide" });
       }
@@ -99,7 +127,7 @@ router.post(
       const [insertResult] = await connection.query(
         `INSERT INTO utilisateurs (matricule, nom, telephone, mail, login, mot_de_passe_hash, role_id, actif)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [matricule, nom, telephone || null, mail, login, passwordHash, roleRow.id, Boolean(actif)]
+        [matricule, nom, telephone || null, mail, login, passwordHash, roleId, Boolean(actif)]
       );
 
       const userId = insertResult.insertId;
@@ -188,8 +216,8 @@ router.put(
         return res.status(404).json({ message: "Utilisateur introuvable" });
       }
 
-      const [[roleRow]] = await connection.query(`SELECT id FROM roles WHERE code = ? LIMIT 1`, [role]);
-      if (!roleRow) {
+      const roleId = await resolveRoleId(connection, role);
+      if (!roleId) {
         await connection.rollback();
         return res.status(400).json({ message: "Role invalide" });
       }
@@ -198,7 +226,7 @@ router.put(
         `UPDATE utilisateurs
          SET nom = ?, telephone = ?, mail = ?, role_id = ?, actif = COALESCE(?, actif)
          WHERE id = ?`,
-        [nom, telephone || null, mail, roleRow.id, typeof actif === "boolean" ? actif : null, id]
+        [nom, telephone || null, mail, roleId, typeof actif === "boolean" ? actif : null, id]
       );
 
       if (!result.affectedRows) {

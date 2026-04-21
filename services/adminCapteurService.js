@@ -1,5 +1,36 @@
 const db = require("../config/db");
 
+let seuilsTableReady = false;
+
+async function ensureSeuilsTable(connection) {
+  if (seuilsTableReady) {
+    return;
+  }
+
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS seuils_capteurs (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      capteur_id INT NOT NULL,
+      usine_id INT NOT NULL,
+      seuil_hc DECIMAL(12,2) NOT NULL DEFAULT 11000,
+      seuil_hp DECIMAL(12,2) NOT NULL DEFAULT 11000,
+      seuil_hpo DECIMAL(12,2) NOT NULL DEFAULT 11000,
+      date_modification DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      modifie_par INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uk_capteur_usine (capteur_id, usine_id),
+      CONSTRAINT fk_seuil_capteur FOREIGN KEY (capteur_id) REFERENCES capteurs(id) ON DELETE CASCADE,
+      CONSTRAINT fk_seuil_usine FOREIGN KEY (usine_id) REFERENCES usines(id) ON DELETE CASCADE,
+      CONSTRAINT fk_seuil_user FOREIGN KEY (modifie_par) REFERENCES utilisateurs(id) ON DELETE SET NULL,
+      INDEX idx_capteur_id (capteur_id),
+      INDEX idx_usine_id (usine_id),
+      INDEX idx_date_modification (date_modification)
+    )
+  `);
+
+  seuilsTableReady = true;
+}
+
 async function findUsineIdByCode(usineCode) {
   if (!usineCode) return null;
 
@@ -21,6 +52,8 @@ async function findUsineIdByCode(usineCode) {
 }
 
 async function syncSeuilsForCapteur(connection, capteurId, usineId, thresholds, userId) {
+  await ensureSeuilsTable(connection);
+
   const { hc, hp, hpo } = thresholds;
 
   if (usineId) {

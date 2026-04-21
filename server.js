@@ -13,6 +13,11 @@ const { initSync, stopSync, getSyncStatus } = require("./services/syncService");
 
 dotenv.config();
 
+function isEnvTrue(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on";
+}
+
 const app = express();
 const server = http.createServer(app);
 const inProd = process.env.NODE_ENV === "production";
@@ -48,7 +53,7 @@ app.get("/health", (req, res) => {
   res.json({
     status: "ok",
     now: new Date().toISOString(),
-    sync_enabled: String(process.env.SYNC_ENABLED || "false") === "true",
+    sync_enabled: isEnvTrue(process.env.SYNC_ENABLED),
     sync_status: getSyncStatus(),
   });
 });

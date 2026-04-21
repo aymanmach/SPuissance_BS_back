@@ -266,7 +266,8 @@ INSERT IGNORE INTO roles (id, code, libelle) VALUES
   (1, 'admin', 'Administrateur'),
   (2, 'superviseur_lac', 'Superviseur LAC'),
   (3, 'superviseur_acierie', 'Superviseur ACIERIE'),
-  (4, 'superviseur_energie', 'Superviseur Energie');
+  (4, 'superviseur_energie', 'Superviseur Energie'),
+  (5, 'superviseur_laf', 'Superviseur LAF');
 
 INSERT IGNORE INTO utilisateurs (id, matricule, nom, telephone, mail, login, mot_de_passe_hash, role_id, actif) VALUES
   (1, '9191', 'Admin Systeme', '+33 6 12 34 56 78', 'admin@energie.fr', 'admin', '$2a$10$ANVsQqLuRxQ0/7l79IH4cuHp23xEDTSReRWznKIQ1JeWHMmIw9cCK', 1, TRUE),
