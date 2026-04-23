@@ -1,5 +1,18 @@
 const db = require("../config/db");
 
+function shouldIgnoreOptionalTableError(error) {
+  const code = String(error?.code || "").toUpperCase();
+  const message = String(error?.message || "").toLowerCase();
+
+  return (
+    code === "ER_NO_SUCH_TABLE" ||
+    code === "ER_TABLEACCESS_DENIED_ERROR" ||
+    code === "ER_DBACCESS_DENIED_ERROR" ||
+    message.includes("doesn't exist") ||
+    message.includes("permission denied")
+  );
+}
+
 function getTrancheFromDateTime(dateTime) {
   const date = new Date(dateTime);
   const hour = date.getHours();
@@ -48,7 +61,21 @@ async function getPrincipalCapteurId(usineId) {
      LIMIT 1`,
     [usineId, usineId]
   );
-  return rows[0]?.id || null;
+
+  if (rows[0]?.id) {
+    return rows[0].id;
+  }
+
+  // Fallback: certaines bases legacy n'ont pas usine_id renseigne sur les capteurs.
+  const [fallbackRows] = await db.query(
+    `SELECT id
+     FROM capteurs
+     WHERE actif = TRUE
+     ORDER BY id ASC
+     LIMIT 1`
+  );
+
+  return fallbackRows[0]?.id || null;
 }
 
 async function getCapteursForUsine(usineId, limit = 3) {
@@ -65,7 +92,23 @@ async function getCapteursForUsine(usineId, limit = 3) {
     [usineId, usineId, Number(limit)]
   );
 
-  return rows;
+  if (rows.length > 0) {
+    return rows;
+  }
+
+  const [fallbackRows] = await db.query(
+    `SELECT id, code, nom,
+            puissance_souscrite_hc,
+            puissance_souscrite_hp,
+            puissance_souscrite_hpo
+     FROM capteurs
+     WHERE actif = TRUE
+     ORDER BY id ASC
+     LIMIT ?`,
+    [Number(limit)]
+  );
+
+  return fallbackRows;
 }
 
 function getCapteurSeuilByTranche(capteur, tranche) {
@@ -92,12 +135,20 @@ function buildDefaultCapteurDistribution(totalValueKw, capteurs, tranche) {
 }
 
 async function logAuditAction(connection, userId, action, cibleId, details) {
-  await connection.query(
-    `INSERT INTO audit_actions (
-      utilisateur_id, module, action, cible_type, cible_id, details
-    ) VALUES (?, 'depassements', ?, 'depassement', ?, ?)`,
-    [userId || null, action, String(cibleId), JSON.stringify(details || {})]
-  );
+  try {
+    await connection.query(
+      `INSERT INTO audit_actions (
+        utilisateur_id, module, action, cible_type, cible_id, details
+      ) VALUES (?, 'depassements', ?, 'depassement', ?, ?)`,
+      [userId || null, action, String(cibleId), JSON.stringify(details || {})]
+    );
+  } catch (error) {
+    if (shouldIgnoreOptionalTableError(error)) {
+      console.warn(`[depassementService] audit log skipped: ${error.code || "UNKNOWN"} ${error.message || ""}`);
+      return;
+    }
+    throw error;
+  }
 }
 
 function normalizeAllowedUsines(allowedUsines = []) {
@@ -144,7 +195,7 @@ async function getDepassementsSynthese(capteurCode = null, allowedUsines = []) {
   return rows;
 }
 
-async function getDepassementsList(capteurCode = "MC02", limit = 100, allowedUsines = []) {
+async function getDepassementsList(capteurCode = null, limit = 100, allowedUsines = []) {
   const { joinClause, whereClause, params } = buildDepassementUsineFilter(allowedUsines);
   const [rows] = await db.query(
     `SELECT d.id, d.date, d.tranche_horaire, d.pa_i_kw, d.pmc_kw, d.seuil_kw, d.ecart_kw,

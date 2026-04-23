@@ -1,32 +1,78 @@
 const db = require("../config/db");
 
 let seuilsTableReady = false;
+let seuilsSyncDisabled = false;
+
+function shouldIgnoreOptionalTableError(error) {
+  const code = String(error?.code || "").toUpperCase();
+  const message = String(error?.message || "").toLowerCase();
+
+  return (
+    code === "ER_NO_SUCH_TABLE" ||
+    code === "ER_TABLEACCESS_DENIED_ERROR" ||
+    code === "ER_DBACCESS_DENIED_ERROR" ||
+    message.includes("create command denied") ||
+    message.includes("doesn't exist") ||
+    message.includes("permission denied")
+  );
+}
+
+function warnOptionalStep(step, error) {
+  const code = String(error?.code || "UNKNOWN");
+  const message = String(error?.message || "");
+  console.warn(`[adminCapteurService] ${step} skipped: ${code} ${message}`);
+}
+
+async function logAuditActionSafe(connection, userId, action, capteurId, details = null) {
+  try {
+    await connection.query(
+      `INSERT INTO audit_actions (utilisateur_id, module, action, cible_type, cible_id, details)
+       VALUES (?, 'capteurs', ?, 'capteur', ?, ?)` ,
+      [userId || null, action, String(capteurId), details ? JSON.stringify(details) : null]
+    );
+  } catch (error) {
+    if (shouldIgnoreOptionalTableError(error)) {
+      warnOptionalStep("audit log", error);
+      return;
+    }
+    throw error;
+  }
+}
 
 async function ensureSeuilsTable(connection) {
-  if (seuilsTableReady) {
+  if (seuilsTableReady || seuilsSyncDisabled) {
     return;
   }
 
-  await connection.query(`
-    CREATE TABLE IF NOT EXISTS seuils_capteurs (
-      id INT PRIMARY KEY AUTO_INCREMENT,
-      capteur_id INT NOT NULL,
-      usine_id INT NOT NULL,
-      seuil_hc DECIMAL(12,2) NOT NULL DEFAULT 11000,
-      seuil_hp DECIMAL(12,2) NOT NULL DEFAULT 11000,
-      seuil_hpo DECIMAL(12,2) NOT NULL DEFAULT 11000,
-      date_modification DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      modifie_par INT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE KEY uk_capteur_usine (capteur_id, usine_id),
-      CONSTRAINT fk_seuil_capteur FOREIGN KEY (capteur_id) REFERENCES capteurs(id) ON DELETE CASCADE,
-      CONSTRAINT fk_seuil_usine FOREIGN KEY (usine_id) REFERENCES usines(id) ON DELETE CASCADE,
-      CONSTRAINT fk_seuil_user FOREIGN KEY (modifie_par) REFERENCES utilisateurs(id) ON DELETE SET NULL,
-      INDEX idx_capteur_id (capteur_id),
-      INDEX idx_usine_id (usine_id),
-      INDEX idx_date_modification (date_modification)
-    )
-  `);
+  try {
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS seuils_capteurs (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        capteur_id INT NOT NULL,
+        usine_id INT NOT NULL,
+        seuil_hc DECIMAL(12,2) NOT NULL DEFAULT 11000,
+        seuil_hp DECIMAL(12,2) NOT NULL DEFAULT 11000,
+        seuil_hpo DECIMAL(12,2) NOT NULL DEFAULT 11000,
+        date_modification DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        modifie_par INT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_capteur_usine (capteur_id, usine_id),
+        CONSTRAINT fk_seuil_capteur FOREIGN KEY (capteur_id) REFERENCES capteurs(id) ON DELETE CASCADE,
+        CONSTRAINT fk_seuil_usine FOREIGN KEY (usine_id) REFERENCES usines(id) ON DELETE CASCADE,
+        CONSTRAINT fk_seuil_user FOREIGN KEY (modifie_par) REFERENCES utilisateurs(id) ON DELETE SET NULL,
+        INDEX idx_capteur_id (capteur_id),
+        INDEX idx_usine_id (usine_id),
+        INDEX idx_date_modification (date_modification)
+      )
+    `);
+  } catch (error) {
+    if (shouldIgnoreOptionalTableError(error)) {
+      seuilsSyncDisabled = true;
+      warnOptionalStep("seuils table ensure", error);
+      return;
+    }
+    throw error;
+  }
 
   seuilsTableReady = true;
 }
@@ -52,43 +98,59 @@ async function findUsineIdByCode(usineCode) {
 }
 
 async function syncSeuilsForCapteur(connection, capteurId, usineId, thresholds, userId) {
-  await ensureSeuilsTable(connection);
-
-  const { hc, hp, hpo } = thresholds;
-
-  if (usineId) {
-    await connection.query(
-      `INSERT INTO seuils_capteurs (
-         capteur_id, usine_id, seuil_hc, seuil_hp, seuil_hpo, modifie_par, date_modification
-       ) VALUES (?, ?, ?, ?, ?, ?, NOW())
-       ON DUPLICATE KEY UPDATE
-         seuil_hc = VALUES(seuil_hc),
-         seuil_hp = VALUES(seuil_hp),
-         seuil_hpo = VALUES(seuil_hpo),
-         modifie_par = VALUES(modifie_par),
-         date_modification = NOW()`,
-      [capteurId, usineId, hc, hp, hpo, userId || null]
-    );
+  if (seuilsSyncDisabled) {
     return;
   }
 
-  const [usines] = await connection.query(
-    `SELECT id FROM usines WHERE actif = TRUE ORDER BY id ASC`
-  );
+  await ensureSeuilsTable(connection);
+  if (seuilsSyncDisabled) {
+    return;
+  }
 
-  for (const usine of usines) {
-    await connection.query(
-      `INSERT INTO seuils_capteurs (
-         capteur_id, usine_id, seuil_hc, seuil_hp, seuil_hpo, modifie_par, date_modification
-       ) VALUES (?, ?, ?, ?, ?, ?, NOW())
-       ON DUPLICATE KEY UPDATE
-         seuil_hc = VALUES(seuil_hc),
-         seuil_hp = VALUES(seuil_hp),
-         seuil_hpo = VALUES(seuil_hpo),
-         modifie_par = VALUES(modifie_par),
-         date_modification = NOW()`,
-      [capteurId, Number(usine.id), hc, hp, hpo, userId || null]
+  const { hc, hp, hpo } = thresholds;
+
+  try {
+    if (usineId) {
+      await connection.query(
+        `INSERT INTO seuils_capteurs (
+           capteur_id, usine_id, seuil_hc, seuil_hp, seuil_hpo, modifie_par, date_modification
+         ) VALUES (?, ?, ?, ?, ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE
+           seuil_hc = VALUES(seuil_hc),
+           seuil_hp = VALUES(seuil_hp),
+           seuil_hpo = VALUES(seuil_hpo),
+           modifie_par = VALUES(modifie_par),
+           date_modification = NOW()`,
+        [capteurId, usineId, hc, hp, hpo, userId || null]
+      );
+      return;
+    }
+
+    const [usines] = await connection.query(
+      `SELECT id FROM usines WHERE actif = TRUE ORDER BY id ASC`
     );
+
+    for (const usine of usines) {
+      await connection.query(
+        `INSERT INTO seuils_capteurs (
+           capteur_id, usine_id, seuil_hc, seuil_hp, seuil_hpo, modifie_par, date_modification
+         ) VALUES (?, ?, ?, ?, ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE
+           seuil_hc = VALUES(seuil_hc),
+           seuil_hp = VALUES(seuil_hp),
+           seuil_hpo = VALUES(seuil_hpo),
+           modifie_par = VALUES(modifie_par),
+           date_modification = NOW()`,
+        [capteurId, Number(usine.id), hc, hp, hpo, userId || null]
+      );
+    }
+  } catch (error) {
+    if (shouldIgnoreOptionalTableError(error)) {
+      seuilsSyncDisabled = true;
+      warnOptionalStep("seuils sync", error);
+      return;
+    }
+    throw error;
   }
 }
 
@@ -176,11 +238,10 @@ async function createCapteur(payload, userId) {
       userId
     );
 
-    await connection.query(
-      `INSERT INTO audit_actions (utilisateur_id, module, action, cible_type, cible_id, details)
-       VALUES (?, 'capteurs', 'create', 'capteur', ?, JSON_OBJECT('code', ?, 'usine', ?))`,
-      [userId || null, String(capteurId), code, usine || null]
-    );
+    await logAuditActionSafe(connection, userId, "create", capteurId, {
+      code,
+      usine: usine || null,
+    });
 
     await connection.commit();
     return capteurId;
@@ -273,11 +334,7 @@ async function updateCapteur(id, payload, userId) {
       userId
     );
 
-    await connection.query(
-      `INSERT INTO audit_actions (utilisateur_id, module, action, cible_type, cible_id)
-       VALUES (?, 'capteurs', 'update', 'capteur', ?)`,
-      [userId || null, String(id)]
-    );
+    await logAuditActionSafe(connection, userId, "update", id);
 
     await connection.commit();
   } catch (error) {
@@ -302,11 +359,19 @@ async function deleteCapteur(id, userId) {
     throw error;
   }
 
-  await db.query(
-    `INSERT INTO audit_actions (utilisateur_id, module, action, cible_type, cible_id)
-     VALUES (?, 'capteurs', 'delete', 'capteur', ?)`,
-    [userId || null, String(id)]
-  );
+  try {
+    await db.query(
+      `INSERT INTO audit_actions (utilisateur_id, module, action, cible_type, cible_id)
+       VALUES (?, 'capteurs', 'delete', 'capteur', ?)`,
+      [userId || null, String(id)]
+    );
+  } catch (error) {
+    if (shouldIgnoreOptionalTableError(error)) {
+      warnOptionalStep("audit log", error);
+      return;
+    }
+    throw error;
+  }
 }
 
 module.exports = {
