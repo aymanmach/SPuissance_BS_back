@@ -248,14 +248,18 @@ async function createCapteur(payload, userId) {
 
     const capteurId = Number(result.insertId);
 
-    // Liaison automatique vers la table seuils_capteurs
-    await syncSeuilsForCapteur(
-      connection,
-      capteurId,
-      usineId,
-      { hc: seuilHc, hp: seuilHp, hpo: seuilHpo },
-      userId
-    );
+    // Liaison automatique vers la table seuils_capteurs (optionnelle, ne pas bloquer)
+    try {
+      await syncSeuilsForCapteur(
+        connection,
+        capteurId,
+        usineId,
+        { hc: seuilHc, hp: seuilHp, hpo: seuilHpo },
+        userId
+      );
+    } catch (seuilError) {
+      console.warn(`[createCapteur] seuils sync failed for capteur ${capteurId}: ${seuilError.message}`);
+    }
 
     await logAuditActionSafe(connection, userId, "create", capteurId, {
       code,
@@ -340,18 +344,22 @@ async function updateCapteur(id, payload, userId) {
       [Number(id)]
     );
 
-    // Liaison automatique vers la table seuils_capteurs
-    await syncSeuilsForCapteur(
-      connection,
-      Number(id),
-      usineId,
-      {
-        hc: Number(capteur?.puissance_souscrite_hc ?? 11000),
-        hp: Number(capteur?.puissance_souscrite_hp ?? 11000),
-        hpo: Number(capteur?.puissance_souscrite_hpo ?? 11000),
-      },
-      userId
-    );
+    // Liaison automatique vers la table seuils_capteurs (optionnelle, ne pas bloquer)
+    try {
+      await syncSeuilsForCapteur(
+        connection,
+        Number(id),
+        usineId,
+        {
+          hc: Number(capteur?.puissance_souscrite_hc ?? 11000),
+          hp: Number(capteur?.puissance_souscrite_hp ?? 11000),
+          hpo: Number(capteur?.puissance_souscrite_hpo ?? 11000),
+        },
+        userId
+      );
+    } catch (seuilError) {
+      console.warn(`[updateCapteur] seuils sync failed for capteur ${id}: ${seuilError.message}`);
+    }
 
     await logAuditActionSafe(connection, userId, "update", id);
 
