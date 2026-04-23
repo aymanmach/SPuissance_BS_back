@@ -135,6 +135,7 @@ function buildDefaultCapteurDistribution(totalValueKw, capteurs, tranche) {
 }
 
 async function logAuditAction(connection, userId, action, cibleId, details) {
+  // Audit log est optionnel - on essaie mais sans casser la transaction
   try {
     await connection.query(
       `INSERT INTO audit_actions (
@@ -143,11 +144,11 @@ async function logAuditAction(connection, userId, action, cibleId, details) {
       [userId || null, action, String(cibleId), JSON.stringify(details || {})]
     );
   } catch (error) {
-    if (shouldIgnoreOptionalTableError(error)) {
-      console.warn(`[depassementService] audit log skipped: ${error.code || "UNKNOWN"} ${error.message || ""}`);
-      return;
+    // Silence les erreurs de table absente/droits insuffisants
+    if (!shouldIgnoreOptionalTableError(error)) {
+      throw error;
     }
-    throw error;
+    console.warn(`[depassementService] audit log skipped: ${error.code || "UNKNOWN"} ${error.message || ""}`);
   }
 }
 

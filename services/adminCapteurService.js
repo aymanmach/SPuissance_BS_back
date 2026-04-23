@@ -102,13 +102,25 @@ async function syncSeuilsForCapteur(connection, capteurId, usineId, thresholds, 
     return;
   }
 
-  await ensureSeuilsTable(connection);
+  const { hc, hp, hpo } = thresholds;
+
+  // Essayer de créer la table si elle n'existe pas
+  try {
+    await ensureSeuilsTable(connection);
+  } catch (error) {
+    if (shouldIgnoreOptionalTableError(error)) {
+      seuilsSyncDisabled = true;
+      warnOptionalStep("seuils table ensure", error);
+      return;
+    }
+    throw error;
+  }
+
   if (seuilsSyncDisabled) {
     return;
   }
 
-  const { hc, hp, hpo } = thresholds;
-
+  // Toute opération INSERT sur seuils est optionnelle - si elle échoue, on ignore
   try {
     if (usineId) {
       await connection.query(
@@ -131,23 +143,30 @@ async function syncSeuilsForCapteur(connection, capteurId, usineId, thresholds, 
     );
 
     for (const usine of usines) {
-      await connection.query(
-        `INSERT INTO seuils_capteurs (
-           capteur_id, usine_id, seuil_hc, seuil_hp, seuil_hpo, modifie_par, date_modification
-         ) VALUES (?, ?, ?, ?, ?, ?, NOW())
-         ON DUPLICATE KEY UPDATE
-           seuil_hc = VALUES(seuil_hc),
-           seuil_hp = VALUES(seuil_hp),
-           seuil_hpo = VALUES(seuil_hpo),
-           modifie_par = VALUES(modifie_par),
-           date_modification = NOW()`,
-        [capteurId, Number(usine.id), hc, hp, hpo, userId || null]
-      );
+      try {
+        await connection.query(
+          `INSERT INTO seuils_capteurs (
+             capteur_id, usine_id, seuil_hc, seuil_hp, seuil_hpo, modifie_par, date_modification
+           ) VALUES (?, ?, ?, ?, ?, ?, NOW())
+           ON DUPLICATE KEY UPDATE
+             seuil_hc = VALUES(seuil_hc),
+             seuil_hp = VALUES(seuil_hp),
+             seuil_hpo = VALUES(seuil_hpo),
+             modifie_par = VALUES(modifie_par),
+             date_modification = NOW()`,
+          [capteurId, Number(usine.id), hc, hp, hpo, userId || null]
+        );
+      } catch (loopError) {
+        if (!shouldIgnoreOptionalTableError(loopError)) {
+          throw loopError;
+        }
+        // Sinon on ignore et on continue la boucle
+      }
     }
   } catch (error) {
     if (shouldIgnoreOptionalTableError(error)) {
       seuilsSyncDisabled = true;
-      warnOptionalStep("seuils sync", error);
+      warnOptionalStep("seuils sync INSERT", error);
       return;
     }
     throw error;
