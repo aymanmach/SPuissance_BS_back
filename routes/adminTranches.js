@@ -2,6 +2,7 @@ const express = require("express");
 const db = require("../config/db");
 const asyncHandler = require("../middlewares/asyncHandler");
 const { requireRole, ROLES } = require("../middlewares/auth");
+const { invalidateTranchesCache } = require("../services/depassementService");
 
 const router = express.Router();
 
@@ -77,6 +78,8 @@ router.post(
         }),
       ]
     );
+
+    invalidateTranchesCache();
 
     res.status(201).json({ id: result.insertId, message: "Tranche creee" });
   })
@@ -169,6 +172,8 @@ router.put(
       ]
     );
 
+    invalidateTranchesCache();
+
     res.json({ message: "Tranche mise a jour" });
   })
 );
@@ -220,6 +225,8 @@ router.delete(
         }),
       ]
     );
+
+    invalidateTranchesCache();
 
     res.json({ message: "Tranche supprimee" });
   })

@@ -1,5 +1,18 @@
 const db = require("../config/db");
 
+const TRANCHE_CACHE_TTL_MS = 60 * 1000;
+let trancheCache = {
+  expiresAt: 0,
+  rows: [],
+};
+
+function invalidateTranchesCache() {
+  trancheCache = {
+    expiresAt: 0,
+    rows: [],
+  };
+}
+
 function shouldIgnoreOptionalTableError(error) {
   const code = String(error?.code || "").toUpperCase();
   const message = String(error?.message || "").toLowerCase();
@@ -13,13 +26,115 @@ function shouldIgnoreOptionalTableError(error) {
   );
 }
 
-function getTrancheFromDateTime(dateTime) {
+function getLegacyTrancheFromDateTime(dateTime) {
   const date = new Date(dateTime);
   const hour = date.getHours();
 
   if (hour >= 22 || hour < 7) return "HC";
   if ((hour >= 7 && hour < 9) || (hour >= 18 && hour < 22)) return "HPO";
   return "HP";
+}
+
+function parseTimeToMinutes(value) {
+  const parts = String(value || "").split(":");
+  if (parts.length < 2) return null;
+
+  const hours = Number(parts[0]);
+  const minutes = Number(parts[1]);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+
+  return hours * 60 + minutes;
+}
+
+function isMinutesInRange(nowMinutes, startMinutes, endMinutes) {
+  if (startMinutes === endMinutes) {
+    return true;
+  }
+  if (startMinutes < endMinutes) {
+    return nowMinutes >= startMinutes && nowMinutes < endMinutes;
+  }
+  return nowMinutes >= startMinutes || nowMinutes < endMinutes;
+}
+
+function getSeasonFromDate(date) {
+  // Convention metier locale: ete d'avril a septembre, hiver sinon.
+  const month = date.getMonth() + 1;
+  return month >= 4 && month <= 9 ? "ete" : "hiver";
+}
+
+async function getActiveTranchesHoraires() {
+  if (Date.now() < trancheCache.expiresAt) {
+    return trancheCache.rows;
+  }
+
+  const [rows] = await db.query(
+    `SELECT id, saison, type_tranche, heure_debut, heure_fin
+     FROM tranches_horaires
+     WHERE actif = TRUE
+     ORDER BY saison ASC, type_tranche ASC, heure_debut ASC`
+  );
+
+  trancheCache = {
+    expiresAt: Date.now() + TRANCHE_CACHE_TTL_MS,
+    rows,
+  };
+
+  return rows;
+}
+
+function resolveTrancheFromRows(date, rows) {
+  const nowMinutes = date.getHours() * 60 + date.getMinutes();
+  const currentSeason = getSeasonFromDate(date);
+
+  const rowsCurrentSeason = rows.filter((row) => String(row.saison || "").toLowerCase() === currentSeason);
+  const scanOrder = rowsCurrentSeason.length > 0 ? rowsCurrentSeason : rows;
+
+  for (const row of scanOrder) {
+    const startMinutes = parseTimeToMinutes(row.heure_debut);
+    const endMinutes = parseTimeToMinutes(row.heure_fin);
+    if (startMinutes == null || endMinutes == null) continue;
+
+    if (isMinutesInRange(nowMinutes, startMinutes, endMinutes)) {
+      return String(row.type_tranche || "").toUpperCase();
+    }
+  }
+
+  return null;
+}
+
+async function getTrancheFromDateTime(dateTime) {
+  const date = new Date(dateTime);
+  if (Number.isNaN(date.getTime())) {
+    return "HP";
+  }
+
+  try {
+    const rows = await getActiveTranchesHoraires();
+    const trancheFromDb = resolveTrancheFromRows(date, rows);
+    if (trancheFromDb === "HC" || trancheFromDb === "HP" || trancheFromDb === "HPO") {
+      return trancheFromDb;
+    }
+  } catch (error) {
+    if (!shouldIgnoreOptionalTableError(error)) {
+      console.warn(`[depassementService] tranche lookup failed: ${error.code || "UNKNOWN"} ${error.message || ""}`);
+    }
+  }
+
+  return getLegacyTrancheFromDateTime(date);
+}
+
+async function acquireAdvisoryLock(lockName, timeoutSeconds = 5) {
+  const [rows] = await db.query(`SELECT GET_LOCK(?, ?) AS acquired`, [lockName, Number(timeoutSeconds)]);
+  return Number(rows?.[0]?.acquired || 0) === 1;
+}
+
+async function releaseAdvisoryLock(lockName) {
+  try {
+    await db.query(`DO RELEASE_LOCK(?)`, [lockName]);
+  } catch {
+    // Ignore release failures: lock is best-effort and auto-released when connection closes.
+  }
 }
 
 function toMysqlDateTime(value) {
@@ -274,7 +389,7 @@ async function createDepassementManual(payload, userId) {
   }
 
   const dateValue = toMysqlDateTime(heure);
-  const tranche = getTrancheFromDateTime(dateValue);
+  const tranche = await getTrancheFromDateTime(dateValue);
   const paIKw = Number(valeur || 0);
   const seuilKw = Number(valeurSouscrite || 0);
   const ecartKw = Number(marge ?? paIKw - seuilKw);
@@ -377,7 +492,7 @@ async function updateDepassementManual(id, payload, userId) {
   }
 
   const dateValue = toMysqlDateTime(heure);
-  const tranche = getTrancheFromDateTime(dateValue);
+  const tranche = await getTrancheFromDateTime(dateValue);
   const paIKw = Number(valeur || 0);
   const seuilKw = Number(valeurSouscrite || 0);
   const ecartKw = Number(marge ?? paIKw - seuilKw);
@@ -527,89 +642,99 @@ async function verifierEtEnregistrerDepassementAutomatique(pmcGlobale, debutDepa
 
   // Tag unique base sur le debut reel du depassement (pas la grille fixe)
   const autoTag = `AUTO | ${windowStart} | ${canonicalWindowEnd}`;
+  const lockName = `dep-auto:${windowStart}:${canonicalWindowEnd}`;
+  const lockAcquired = await acquireAdvisoryLock(lockName, 5);
 
-  // Deduplication : eviter d'inserer deux fois le meme depassement
-  const [existingRows] = await db.query(
-    `SELECT id
-     FROM depassements
-     WHERE description LIKE CONCAT(?, '%')
-     LIMIT 1`,
-    [autoTag]
-  );
-
-  if (existingRows[0]) {
-    return { inserted: false, reason: "already-recorded", id: existingRows[0].id };
+  if (!lockAcquired) {
+    return { inserted: false, reason: "lock-timeout" };
   }
 
-  // Capteur principal = celui avec la pmc_kw la plus haute
-  const capteursValides = capteurs.filter((capteur) => Number(capteur.pmc_kw || 0) > 0);
-  const capteurPrincipal =
-    [...capteursValides].sort((a, b) => Number(b.pmc_kw || 0) - Number(a.pmc_kw || 0))[0] ||
-    capteurs[0] ||
-    null;
-
-  if (!capteurPrincipal?.capteur_id) {
-    return { inserted: false, reason: "no-capteur" };
-  }
-
-  const [usineRows] = await db.query(
-    `SELECT usine_id
-     FROM capteurs
-     WHERE id = ?
-     LIMIT 1`,
-    [Number(capteurPrincipal.capteur_id)]
-  );
-  const usineId = usineRows[0]?.usine_id || null;
-
-  // La tranche est determinee a partir du debut reel du depassement
-  const tranche = getTrancheFromDateTime(windowStartDate);
-
-  const connection = await db.getConnection();
   try {
-    await connection.beginTransaction();
-
-    const description = `${autoTag} Depassement  ( ${windowStart} ->  ${canonicalWindowEnd} )`;
-    const [insertResult] = await connection.query(
-      `INSERT INTO depassements (
-        capteur_id, usine_id, date, tranche_horaire,
-        pa_i_kw, pmc_kw, seuil_kw, ecart_kw, description, acquitte
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE)`,
-      [
-        Number(capteurPrincipal.capteur_id),
-        usineId,
-        canonicalWindowEnd,          // date = fin de la fenetre
-        tranche,
-        Number(pmcGlobale.pa_i_kw || 0),
-        pmcKw,
-        seuilKw,
-        pmcKw - seuilKw,
-        description,
-      ]
+    // Deduplication sous verrou inter-instances.
+    const [existingRows] = await db.query(
+      `SELECT id
+       FROM depassements
+       WHERE description LIKE CONCAT(?, '%')
+       LIMIT 1`,
+      [autoTag]
     );
 
-    const depassementId = insertResult.insertId;
-
-    for (const capteur of capteursValides) {
-      await connection.query(
-        `INSERT INTO depassement_capteurs (
-          depassement_id, capteur_id, valeur_kw, seuil_kw
-        ) VALUES (?, ?, ?, ?)`,
-        [
-          depassementId,
-          Number(capteur.capteur_id),
-          Number(capteur.pmc_kw || 0),
-          Number(capteur.puissance_souscrite || 0),
-        ]
-      );
+    if (existingRows[0]) {
+      return { inserted: false, reason: "already-recorded", id: existingRows[0].id };
     }
 
-    await connection.commit();
-    return { inserted: true, id: depassementId };
-  } catch (error) {
-    await connection.rollback();
-    throw error;
+    // Capteur principal = celui avec la pmc_kw la plus haute
+    const capteursValides = capteurs.filter((capteur) => Number(capteur.pmc_kw || 0) > 0);
+    const capteurPrincipal =
+      [...capteursValides].sort((a, b) => Number(b.pmc_kw || 0) - Number(a.pmc_kw || 0))[0] ||
+      capteurs[0] ||
+      null;
+
+    if (!capteurPrincipal?.capteur_id) {
+      return { inserted: false, reason: "no-capteur" };
+    }
+
+    const [usineRows] = await db.query(
+      `SELECT usine_id
+       FROM capteurs
+       WHERE id = ?
+       LIMIT 1`,
+      [Number(capteurPrincipal.capteur_id)]
+    );
+    const usineId = usineRows[0]?.usine_id || null;
+
+    // La tranche est determinee a partir du debut reel du depassement
+    const tranche = await getTrancheFromDateTime(windowStartDate);
+
+    const connection = await db.getConnection();
+    try {
+      await connection.beginTransaction();
+
+      const description = `${autoTag} Depassement  ( ${windowStart} ->  ${canonicalWindowEnd} )`;
+      const [insertResult] = await connection.query(
+        `INSERT INTO depassements (
+          capteur_id, usine_id, date, tranche_horaire,
+          pa_i_kw, pmc_kw, seuil_kw, ecart_kw, description, acquitte
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE)`,
+        [
+          Number(capteurPrincipal.capteur_id),
+          usineId,
+          canonicalWindowEnd,          // date = fin de la fenetre
+          tranche,
+          Number(pmcGlobale.pa_i_kw || 0),
+          pmcKw,
+          seuilKw,
+          pmcKw - seuilKw,
+          description,
+        ]
+      );
+
+      const depassementId = insertResult.insertId;
+
+      for (const capteur of capteursValides) {
+        await connection.query(
+          `INSERT INTO depassement_capteurs (
+            depassement_id, capteur_id, valeur_kw, seuil_kw
+          ) VALUES (?, ?, ?, ?)`,
+          [
+            depassementId,
+            Number(capteur.capteur_id),
+            Number(capteur.pmc_kw || 0),
+            Number(capteur.puissance_souscrite || 0),
+          ]
+        );
+      }
+
+      await connection.commit();
+      return { inserted: true, id: depassementId };
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
   } finally {
-    connection.release();
+    await releaseAdvisoryLock(lockName);
   }
 }
 
@@ -745,6 +870,7 @@ async function getDepassementsMaxParTranche(debut, fin, allowedUsines = []) {
 }
 
 module.exports = {
+  invalidateTranchesCache,
   getDepassementsSynthese,
   getDepassementsList,
   getDepassementsParJour,
