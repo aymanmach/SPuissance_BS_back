@@ -24,7 +24,7 @@ router.get(
     const queryParams = applyUsineFilter ? [userUsines] : [];
 
     const [rows] = await db.query(
-      `SELECT c.id, c.code, c.nom, c.puissance_souscrite_hc, c.puissance_souscrite_hp, c.puissance_souscrite_hpo,
+      `SELECT c.id, c.code, c.nom, c.precision, c.puissance_souscrite_hc, c.puissance_souscrite_hp, c.puissance_souscrite_hpo,
               c.actif,
               (
                 SELECT m.tranche_horaire

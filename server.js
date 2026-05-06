@@ -4,14 +4,14 @@ const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const dotenv = require("dotenv");
 
+dotenv.config();
+
 const apiRoutes = require("./routes");
 const db = require("./config/db");
 const { buildSessionMiddleware } = require("./config/session");
 const { notFoundHandler, errorHandler } = require("./middlewares/errorHandler");
 const { initWebSocket } = require("./websocket/realtime");
 const { initSync, stopSync, getSyncStatus } = require("./services/syncService");
-
-dotenv.config();
 
 function isEnvTrue(value) {
   const normalized = String(value ?? "").trim().toLowerCase();

@@ -21,9 +21,9 @@ let payloadInFlight = null;
 let globalTickerStarted = false;
 
 // --- Etat de la fenetre glissante de depassement ---
-// Stocke le debut du depassement continu et la pmc max observee
+// Stocke le debut du depassement continu, la pmc max observee et si la fenetre a deja ete enregistree
 let depassementEnCours = null;
-// Structure : { debut: Date, maxPmcKw: Number, capteurs: Array }
+// Structure : { debut: Date, maxPmcKw: Number, capteurs: Array, dejaEnregistre: Boolean }
 
 async function getOrBuildPayload() {
   const now = Date.now();
@@ -94,7 +94,7 @@ function emitAlertIfNeeded(io, payload) {
 /**
  * Gere la logique de fenetre glissante :
  * - Si pmc >= seuil : on demarre ou on continue le chrono
- * - Si 10 min continues ecoulees : on enregistre et on reset
+ * - Si 10 min continues ecoulees : on enregistre une seule fois pour cet episode
  * - Si pmc < seuil : on annule le chrono en cours
  */
 async function gererFenetreGlissanteDepassement(pmc) {
@@ -120,6 +120,7 @@ async function gererFenetreGlissanteDepassement(pmc) {
         debut: now,
         maxPmcKw: pmcKw,
         capteurs: pmc.capteurs || [],
+        dejaEnregistre: false,
       };
       console.log(`[DEPASSEMENT] Debut detecte a ${now.toISOString()} | pmc=${pmcKw} kW | seuil=${seuilKw} kW`);
     } else {
@@ -131,8 +132,8 @@ async function gererFenetreGlissanteDepassement(pmc) {
 
       const dureeMs = now.getTime() - depassementEnCours.debut.getTime();
 
-      if (dureeMs >= DEPASSEMENT_DUREE_MIN_MS) {
-        // 10 minutes continues atteintes : on enregistre
+      if (!depassementEnCours.dejaEnregistre && dureeMs >= DEPASSEMENT_DUREE_MIN_MS) {
+        // 10 minutes continues atteintes : on enregistre une seule fois pour cet episode
         console.log(`[DEPASSEMENT] 10 min continues atteintes. Enregistrement... debut=${depassementEnCours.debut.toISOString()}`);
 
         try {
@@ -141,13 +142,23 @@ async function gererFenetreGlissanteDepassement(pmc) {
             pmc_kw: depassementEnCours.maxPmcKw,
             capteurs: depassementEnCours.capteurs,
           };
-          await verifierEtEnregistrerDepassementAutomatique(pmcPourEnregistrement, depassementEnCours.debut);
+          const result = await verifierEtEnregistrerDepassementAutomatique(pmcPourEnregistrement, depassementEnCours.debut);
+          if (result?.inserted || result?.reason === "already-recorded") {
+            if (pmcKw >= seuilKw) {
+              depassementEnCours = {
+                debut: now,
+                maxPmcKw: pmcKw,
+                capteurs: pmc.capteurs || [],
+                dejaEnregistre: false,
+              };
+              console.log(`[DEPASSEMENT] Nouveau cycle relance a ${now.toISOString()} | pmc=${pmcKw} kW | seuil=${seuilKw} kW`);
+            } else {
+              depassementEnCours.dejaEnregistre = true;
+            }
+          }
         } catch (error) {
           console.error("[DEPASSEMENT] Erreur enregistrement automatique:", error.message);
         }
-
-        // Reset : on repart a zero (un nouveau depassement peut commencer immediatement)
-        depassementEnCours = null;
       }
     }
   } else if (pmcKw < seuilAnnulation) {

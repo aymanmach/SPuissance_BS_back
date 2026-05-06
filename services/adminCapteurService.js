@@ -182,6 +182,7 @@ async function listCapteurs() {
             us.code AS usine,
             c.type,
             c.description,
+            c.precision,
             c.actif,
             c.puissance_souscrite_hc,
             c.puissance_souscrite_hp,
@@ -201,6 +202,7 @@ async function createCapteur(payload, userId) {
     usine,
     type,
     description,
+    precision,
     actif = true,
     frequence_secondes,
     puissance_souscrite_hc,
@@ -229,9 +231,9 @@ async function createCapteur(payload, userId) {
 
     const [result] = await connection.query(
       `INSERT INTO capteurs (
-         code, nom, frequence_secondes, usine_id, type, description, actif,
+         code, nom, frequence_secondes, usine_id, type, description, precision, actif,
          puissance_souscrite_hc, puissance_souscrite_hp, puissance_souscrite_hpo
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         code,
         nom,
@@ -239,6 +241,7 @@ async function createCapteur(payload, userId) {
         usineId,
         type || null,
         description || null,
+        precision || null,
         Boolean(actif),
         seuilHc,
         seuilHp,
@@ -282,6 +285,7 @@ async function updateCapteur(id, payload, userId) {
     usine,
     type,
     description,
+    precision,
     actif,
     frequence_secondes,
     puissance_souscrite_hc,
@@ -311,6 +315,7 @@ async function updateCapteur(id, payload, userId) {
            usine_id = ?,
            type = ?,
            description = ?,
+           precision = ?,
            actif = COALESCE(?, actif),
            puissance_souscrite_hc = COALESCE(?, puissance_souscrite_hc),
            puissance_souscrite_hp = COALESCE(?, puissance_souscrite_hp),
@@ -322,6 +327,7 @@ async function updateCapteur(id, payload, userId) {
         usineId,
         type || null,
         description || null,
+        precision || null,
         typeof actif === "boolean" ? actif : null,
         puissance_souscrite_hc,
         puissance_souscrite_hp,
