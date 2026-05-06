@@ -2,6 +2,8 @@ const db = require("../config/db");
 
 let seuilsTableReady = false;
 let seuilsSyncDisabled = false;
+let precisionColumnReady = false;
+let precisionColumnChecked = false;
 
 function shouldIgnoreOptionalTableError(error) {
   const code = String(error?.code || "").toUpperCase();
@@ -97,6 +99,41 @@ async function findUsineIdByCode(usineCode) {
   return Number(usine.id);
 }
 
+async function ensurePrecisionColumn(connection) {
+  if (precisionColumnChecked && precisionColumnReady) {
+    return true;
+  }
+
+  precisionColumnChecked = true;
+
+  const [[column]] = await connection.query(
+    `SELECT COUNT(*) AS total
+     FROM information_schema.columns
+     WHERE table_schema = DATABASE()
+       AND table_name = 'capteurs'
+       AND column_name = 'precision'`
+  );
+
+  if (Number(column?.total || 0) > 0) {
+    precisionColumnReady = true;
+    return true;
+  }
+
+  try {
+    await connection.query(
+      "ALTER TABLE capteurs ADD COLUMN `precision` VARCHAR(100) NULL AFTER description"
+    );
+    precisionColumnReady = true;
+    return true;
+  } catch (error) {
+    if (shouldIgnoreOptionalTableError(error)) {
+      warnOptionalStep("precision column ensure", error);
+      return false;
+    }
+    throw error;
+  }
+}
+
 async function syncSeuilsForCapteur(connection, capteurId, usineId, thresholds, userId) {
   if (seuilsSyncDisabled) {
     return;
@@ -174,25 +211,33 @@ async function syncSeuilsForCapteur(connection, capteurId, usineId, thresholds, 
 }
 
 async function listCapteurs() {
-  const [rows] = await db.query(
-    `SELECT c.id,
-            c.code,
-            c.nom,
-            c.frequence_secondes,
-            us.code AS usine,
-            c.type,
-            c.description,
-            c.precision,
-            c.actif,
-            c.puissance_souscrite_hc,
-            c.puissance_souscrite_hp,
-            c.puissance_souscrite_hpo
-     FROM capteurs c
-     LEFT JOIN usines us ON us.id = c.usine_id
-     ORDER BY c.id ASC`
-  );
+  const connection = await db.getConnection();
+  try {
+    const hasPrecisionColumn = await ensurePrecisionColumn(connection);
+    const precisionSelect = hasPrecisionColumn ? "c.`precision`" : "NULL";
 
-  return rows;
+    const [rows] = await connection.query(
+      `SELECT c.id,
+              c.code,
+              c.nom,
+              c.frequence_secondes,
+              us.code AS usine,
+              c.type,
+              c.description,
+              ${precisionSelect} AS precision,
+              c.actif,
+              c.puissance_souscrite_hc,
+              c.puissance_souscrite_hp,
+              c.puissance_souscrite_hpo
+       FROM capteurs c
+       LEFT JOIN usines us ON us.id = c.usine_id
+       ORDER BY c.id ASC`
+    );
+
+    return rows;
+  } finally {
+    connection.release();
+  }
 }
 
 async function createCapteur(payload, userId) {
@@ -228,25 +273,31 @@ async function createCapteur(payload, userId) {
   const connection = await db.getConnection();
   try {
     await connection.beginTransaction();
+    const hasPrecisionColumn = await ensurePrecisionColumn(connection);
+
+    const insertColumns = hasPrecisionColumn
+      ? "code, nom, frequence_secondes, usine_id, type, description, `precision`, actif, puissance_souscrite_hc, puissance_souscrite_hp, puissance_souscrite_hpo"
+      : "code, nom, frequence_secondes, usine_id, type, description, actif, puissance_souscrite_hc, puissance_souscrite_hp, puissance_souscrite_hpo";
+    const insertPlaceholders = hasPrecisionColumn ? "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?" : "?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+    const insertValues = hasPrecisionColumn
+      ? [
+          code,
+          nom,
+          frequence,
+          usineId,
+          type || null,
+          description || null,
+          precision || null,
+          Boolean(actif),
+          seuilHc,
+          seuilHp,
+          seuilHpo,
+        ]
+      : [code, nom, frequence, usineId, type || null, description || null, Boolean(actif), seuilHc, seuilHp, seuilHpo];
 
     const [result] = await connection.query(
-      `INSERT INTO capteurs (
-         code, nom, frequence_secondes, usine_id, type, description, precision, actif,
-         puissance_souscrite_hc, puissance_souscrite_hp, puissance_souscrite_hpo
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        code,
-        nom,
-        frequence,
-        usineId,
-        type || null,
-        description || null,
-        precision || null,
-        Boolean(actif),
-        seuilHc,
-        seuilHp,
-        seuilHpo,
-      ]
+      `INSERT INTO capteurs (${insertColumns}) VALUES (${insertPlaceholders})`,
+      insertValues
     );
 
     const capteurId = Number(result.insertId);
@@ -307,6 +358,35 @@ async function updateCapteur(id, payload, userId) {
   const connection = await db.getConnection();
   try {
     await connection.beginTransaction();
+    const hasPrecisionColumn = await ensurePrecisionColumn(connection);
+
+    const setPrecisionClause = hasPrecisionColumn ? ",\n           `precision` = ?" : "";
+    const updateValues = hasPrecisionColumn
+      ? [
+          nom,
+          frequenceUpdate,
+          usineId,
+          type || null,
+          description || null,
+          precision || null,
+          typeof actif === "boolean" ? actif : null,
+          puissance_souscrite_hc,
+          puissance_souscrite_hp,
+          puissance_souscrite_hpo,
+          Number(id),
+        ]
+      : [
+          nom,
+          frequenceUpdate,
+          usineId,
+          type || null,
+          description || null,
+          typeof actif === "boolean" ? actif : null,
+          puissance_souscrite_hc,
+          puissance_souscrite_hp,
+          puissance_souscrite_hpo,
+          Number(id),
+        ];
 
     const [result] = await connection.query(
       `UPDATE capteurs
@@ -315,25 +395,13 @@ async function updateCapteur(id, payload, userId) {
            usine_id = ?,
            type = ?,
            description = ?,
-           precision = ?,
+           ${hasPrecisionColumn ? "`precision` = ?," : ""}
            actif = COALESCE(?, actif),
            puissance_souscrite_hc = COALESCE(?, puissance_souscrite_hc),
            puissance_souscrite_hp = COALESCE(?, puissance_souscrite_hp),
            puissance_souscrite_hpo = COALESCE(?, puissance_souscrite_hpo)
        WHERE id = ?`,
-      [
-        nom,
-        frequenceUpdate,
-        usineId,
-        type || null,
-        description || null,
-        precision || null,
-        typeof actif === "boolean" ? actif : null,
-        puissance_souscrite_hc,
-        puissance_souscrite_hp,
-        puissance_souscrite_hpo,
-        Number(id),
-      ]
+      updateValues
     );
 
     if (!result.affectedRows) {

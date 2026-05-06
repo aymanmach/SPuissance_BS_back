@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS capteurs (
   nom VARCHAR(100) NOT NULL,
   table_source VARCHAR(100) NOT NULL,
   frequence_secondes INT NOT NULL DEFAULT 60,
+  `precision` VARCHAR(100) NULL,
   puissance_souscrite_hc DECIMAL(10,2) DEFAULT 11000,
   puissance_souscrite_hp DECIMAL(10,2) DEFAULT 11000,
   puissance_souscrite_hpo DECIMAL(10,2) DEFAULT 11000,
