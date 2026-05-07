@@ -15,13 +15,41 @@ router.get(
 
     await ensureDailySensorErrorLogs(getVirtualNow());
 
-    const [rows] = await db.query(
-      `SELECT id, date, niveau, source, message
-       FROM logs_systeme
-       ORDER BY date DESC
-       LIMIT ?`,
-      [limit]
-    );
+    const user = req.session.user;
+    const usines = Array.isArray(user.usines) ? user.usines : [];
+
+    // Admin et superviseur_energie voient tous les logs
+    const voitTout =
+      !usines.length ||
+      user.role === "admin" ||
+      user.role === "superviseur" ||
+      user.role === "superviseur_energie";
+
+    let rows;
+    if (voitTout) {
+      [rows] = await db.query(
+        `SELECT id, date, niveau, source, message
+         FROM logs_systeme
+         ORDER BY date DESC
+         LIMIT ?`,
+        [limit]
+      );
+    } else {
+      // Filtre par usine via le capteur référencé dans metadata.capteur_id
+      // Les logs sans capteur_id (logs systeme globaux) sont visibles par tous
+      [rows] = await db.query(
+        `SELECT l.id, l.date, l.niveau, l.source, l.message
+         FROM logs_systeme l
+         LEFT JOIN capteurs c
+           ON c.id = CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(l.metadata, '$.capteur_id')), 'null') AS UNSIGNED)
+         LEFT JOIN usines u ON u.id = c.usine_id
+         WHERE u.code IN (?)
+            OR JSON_EXTRACT(l.metadata, '$.capteur_id') IS NULL
+         ORDER BY l.date DESC
+         LIMIT ?`,
+        [usines, limit]
+      );
+    }
 
     res.json(rows);
   })
