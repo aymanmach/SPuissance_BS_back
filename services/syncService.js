@@ -475,8 +475,75 @@ function getSyncStatus() {
   }));
 }
 
+async function reloadSync() {
+  if (!started) {
+    return { added: 0, total: 0, message: "Sync non activee" };
+  }
+
+  const [capteurs] = await db.query(
+    `SELECT id, code, frequence_secondes, table_source
+     FROM capteurs
+     WHERE actif = TRUE
+     ORDER BY id ASC`
+  );
+
+  let added = 0;
+  for (const capteur of capteurs) {
+    const capteurId = Number(capteur.id);
+    if (state.has(capteurId)) continue;
+
+    const normalizedCode = normalizeCapteurCode(capteur.code);
+    const tableSource = resolveSourceTableForCapteur(capteur);
+
+    const info = {
+      capteurId,
+      code: normalizedCode,
+      tableSource,
+      frequenceSecondes: Math.max(1, Number(capteur.frequence_secondes || 60)),
+      cursor: buildProjectedSourceDate(),
+      lastSourceDate: null,
+      paColumn: '[Total_Preal]',
+      buffer: [],
+      timer: null,
+      done: false,
+      lastError: null,
+      inFlight: false,
+      retryAt: 0,
+      consecutiveErrors: 0,
+    };
+    state.set(capteurId, info);
+
+    if (!tableSource) {
+      const s = state.get(capteurId);
+      s.lastError = `Table source manquante pour code ${normalizedCode}`;
+      state.set(capteurId, s);
+      console.warn(`[SYNC RELOAD] Table source manquante pour ${normalizedCode}`);
+      continue;
+    }
+
+    if (!isValidSqlIdentifier(tableSource)) {
+      const s = state.get(capteurId);
+      s.lastError = `Nom de table invalide pour ${normalizedCode}`;
+      state.set(capteurId, s);
+      console.warn(`[SYNC RELOAD] Nom de table invalide pour ${normalizedCode}`);
+      continue;
+    }
+
+    startLoopForCapteur(capteurId);
+    added++;
+    console.log(`[SYNC RELOAD] Capteur ${normalizedCode} -> table ${tableSource} (nouveau)`);
+  }
+
+  if (added > 0) {
+    console.log(`[SYNC RELOAD] ${added} nouveau(x) capteur(s) ajoute(s) a la sync`);
+  }
+
+  return { added, total: state.size };
+}
+
 module.exports = {
   initSync,
   stopSync,
   getSyncStatus,
+  reloadSync,
 };

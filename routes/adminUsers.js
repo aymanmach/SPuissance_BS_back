@@ -222,17 +222,12 @@ router.put(
         return res.status(400).json({ message: "Role invalide" });
       }
 
-      const [result] = await connection.query(
+      await connection.query(
         `UPDATE utilisateurs
          SET nom = ?, telephone = ?, mail = ?, role_id = ?, actif = COALESCE(?, actif)
          WHERE id = ?`,
         [nom, telephone || null, mail, roleId, typeof actif === "boolean" ? actif : null, id]
       );
-
-      if (!result.affectedRows) {
-        await connection.rollback();
-        return res.status(404).json({ message: "Utilisateur introuvable" });
-      }
 
       const afterUser = {
         id,
