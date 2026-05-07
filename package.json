@@ -7,9 +7,9 @@
   "scripts": {
     "dev": "nodemon server.js",
     "start": "node server.js",
-    "check:syntax": "node scripts/check-syntax.js",
-    "migrate": "node database/migrate_mc02.js",
-    "migrate:backup": "echo Utiliser: mysql -u root -p basetest < database/migrate_backup.sql"
+    "db:init": "mysql -u root -p basetest < database/init.sql",
+    "db:reset": "mysql -u root -p -e \"DROP DATABASE IF EXISTS basetest; CREATE DATABASE basetest CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\" && npm run db:init",
+    "migrate": "node database/migrate_mc02.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

@@ -224,7 +224,7 @@ async function listCapteurs() {
               us.code AS usine,
               c.type,
               c.description,
-              ${precisionSelect} AS precision,
+              ${precisionSelect} AS \`precision\`,
               c.actif,
               c.puissance_souscrite_hc,
               c.puissance_souscrite_hp,

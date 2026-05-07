@@ -28,7 +28,14 @@ function isEnvTrue(value) {
 }
 
 const TABLE_MAP = {
-  A127: "A127_MC02",
+  A127: "A127",
+  A21: "A21",
+  A12: "A12",
+  A120: "A120",
+  A128: "A128",
+  A18: "A18",
+  A15: "A15",
+  A135: "A135",
   A137: "A137_MC02",
   A138: "A138_MC02",
   A139: "A139_MC02",
@@ -191,6 +198,7 @@ async function initSync() {
       frequenceSecondes: Math.max(1, Number(capteur.frequence_secondes || 60)),
       cursor: buildProjectedSourceDate(),
       lastSourceDate: null,
+      paColumn: '[Total_Preal]',
       buffer: [],
       timer: null,
       done: false,
@@ -308,23 +316,40 @@ async function readNextValue(capteurId) {
   const lowerBound = new Date(projectedSourceDate.getTime() - toleranceMs);
 
   const pool = await getSourcePool();
-  const query = `
-    SELECT TOP 1 [date], [PA_I]
+
+  const buildQuery = (expr) => `
+    SELECT TOP 1 [date], ${expr} AS PA_I
     FROM [${SCHEMA}].[${info.tableSource}]
     WHERE [date] <= @projectedSourceDate
       AND [date] >= @lowerBound
-      AND [PA_I] IS NOT NULL
-      AND [PA_I] >= 0
-      AND (@maxPai <= 0 OR [PA_I] <= @maxPai)
+      AND ${expr} IS NOT NULL
+      AND ${expr} >= 0
+      AND (@maxPai <= 0 OR ${expr} <= @maxPai)
     ORDER BY [date] DESC
   `;
 
-  let result = await pool
+  const runQuery = (expr) => pool
     .request()
     .input("projectedSourceDate", sql.DateTime, projectedSourceDate)
     .input("lowerBound", sql.DateTime, lowerBound)
     .input("maxPai", sql.Decimal(12, 3), MAX_VALID_PAI)
-    .query(query);
+    .query(buildQuery(expr));
+
+  let paExpr = info.paColumn || '[Total_Preal]';
+  let result;
+  try {
+    result = await runQuery(paExpr);
+  } catch (err) {
+    const msg = String(err?.message || '').toLowerCase();
+    if (paExpr === '[Total_Preal]' && msg.includes('invalid column name') && msg.includes('total_preal')) {
+      paExpr = '[PA_I]';
+      info.paColumn = '[PA_I]';
+      state.set(capteurId, info);
+      result = await runQuery(paExpr);
+    } else {
+      throw err;
+    }
+  }
 
   // Fallback borne: certaines tables source n'ont pas de point dans la fenetre courte.
   if (!result.recordset.length && SYNC_SOURCE_LOOKBACK_FALLBACK_SECONDS > SYNC_SOURCE_LOOKBACK_SECONDS) {
@@ -336,7 +361,7 @@ async function readNextValue(capteurId) {
       .input("projectedSourceDate", sql.DateTime, projectedSourceDate)
       .input("lowerBound", sql.DateTime, fallbackLowerBound)
       .input("maxPai", sql.Decimal(12, 3), MAX_VALID_PAI)
-      .query(query);
+      .query(buildQuery(paExpr));
   }
 
   if (!result.recordset.length) {

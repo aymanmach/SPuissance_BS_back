@@ -115,7 +115,7 @@ async function getLatestMeasurePerCapteur(virtualNowSql, allowedUsines = []) {
             c.puissance_souscrite_hp,
             c.puissance_souscrite_hpo,
             m.date,
-            m.pa_i,
+            m.pa_i AS pa_i,
             m.tranche_horaire
      FROM capteurs c
      LEFT JOIN usines us_data ON us_data.id = c.usine_id
@@ -153,7 +153,7 @@ async function getWindowMeasuresByCapteur(windowStartSql, windowEndSql, allowedU
             c.code,
             COALESCE(c.frequence_secondes, 60) AS frequence_secondes,
             m.date,
-            m.pa_i
+            m.pa_i AS pa_i
      FROM mesures m
      JOIN capteurs c ON c.id = m.capteur_id
      ${joinClause}
@@ -249,9 +249,9 @@ async function getPaiEvolutionParCapteur(debut, fin, allowedUsines = []) {
      ${joinClause}
      WHERE c.actif = TRUE
        ${whereClause}
-       AND m.date BETWEEN ? AND ?
-       AND m.pa_i > 0
-       AND m.pa_i <= ?
+      AND m.date BETWEEN ? AND ?
+      AND m.pa_i > 0
+      AND m.pa_i <= ?
      GROUP BY DATE_FORMAT(m.date, '%Y-%m-%d %H:%i:00'), c.code
      ORDER BY date ASC, c.code ASC`,
     [...params, debut, fin, MAX_VALID_PAI_KW]
@@ -322,9 +322,9 @@ async function getPmcEvolutionParCapteur(debut, fin, allowedUsines = []) {
      ${joinClause}
      WHERE c.actif = TRUE
        ${whereClause}
-       AND m.date BETWEEN ? AND ?
-       AND m.pa_i > 0
-       AND m.pa_i <= ?
+      AND m.date BETWEEN ? AND ?
+      AND m.pa_i > 0
+      AND m.pa_i <= ?
      GROUP BY DATE_FORMAT(m.date, '%Y-%m-%d %H:%i:00'), c.code
      ORDER BY date ASC, c.code ASC`,
     [...params, debut, fin, MAX_VALID_PAI_KW]

@@ -270,23 +270,26 @@ INSERT IGNORE INTO usines (id, code, nom, localisation, actif) VALUES
 
 INSERT IGNORE INTO roles (id, code, libelle) VALUES
   (1, 'admin', 'Administrateur'),
-  (2, 'superviseur_lac', 'Superviseur LAC'),
-  (3, 'superviseur_acierie', 'Superviseur ACIERIE'),
-  (4, 'superviseur_energie', 'Superviseur Energie');
+  (2, 'superviseur', 'Superviseur'),
+  (3, 'superviseur_lac', 'Superviseur LAC'),
+  (4, 'superviseur_acierie', 'Superviseur ACIERIE'),
+  (5, 'superviseur_energie', 'Superviseur Energie');
 
 INSERT IGNORE INTO utilisateurs
   (id, matricule, nom, telephone, mail, login, mot_de_passe_hash, role_id, actif)
 VALUES
   (1, '9191', 'Admin Systeme', '+33 6 12 34 56 78', 'admin@energie.fr', 'admin', '$2a$10$ANVsQqLuRxQ0/7l79IH4cuHp23xEDTSReRWznKIQ1JeWHMmIw9cCK', 1, TRUE),
-  (2, '9192', 'Superviseur LAC', '+33 6 87 65 43 21', 'lac@energie.fr', 'lac', '$2a$10$vozqJ778qYQWwmnvOf8Z1.nk1/NfR3aa.6AXpyvScuqYbNiW9LFQ6', 2, TRUE),
-  (3, '9193', 'Superviseur ACIERIE', '+33 6 11 22 33 44', 'acierie@energie.fr', 'acierie', '$2a$10$3fhndejFrlezdnruN0bL2uWg/xlgkrBbN1mGTILmK9kBhDU2oU9P.', 3, TRUE),
-  (4, '9194', 'Superviseur Energie', '+33 6 99 88 77 66', 'energie@energie.fr', 'energie', '$2a$10$rSoFE35VcW3bIW9zbcMESu.lSJNq0K4fTN5OPpKUQxxhLHcOpndVm', 4, TRUE);
+  (2, '9195', 'Superviseur Principal', '+33 6 55 66 77 88', 'superviseur@energie.fr', 'superviseur', '$2a$10$s7uJzZ9K3vXbHnmQ2Lp0MuLpQ4rKjWgNbQ9Z2sRxYhT3vH0c9L7nG', 2, TRUE),
+  (3, '9192', 'Superviseur LAC', '+33 6 87 65 43 21', 'lac@energie.fr', 'lac', '$2a$10$vozqJ778qYQWwmnvOf8Z1.nk1/NfR3aa.6AXpyvScuqYbNiW9LFQ6', 3, TRUE),
+  (4, '9193', 'Superviseur ACIERIE', '+33 6 11 22 33 44', 'acierie@energie.fr', 'acierie', '$2a$10$3fhndejFrlezdnruN0bL2uWg/xlgkrBbN1mGTILmK9kBhDU2oU9P.', 4, TRUE),
+  (5, '9194', 'Superviseur Energie', '+33 6 99 88 77 66', 'energie@energie.fr', 'energie', '$2a$10$rSoFE35VcW3bIW9zbcMESu.lSJNq0K4fTN5OPpKUQxxhLHcOpndVm', 5, TRUE);
 
 INSERT IGNORE INTO utilisateur_usines (utilisateur_id, usine_id) VALUES
   (1, 1), (1, 2), (1, 3),
-  (2, 1),
-  (3, 2),
-  (4, 1), (4, 2), (4, 3);
+  (2, 1), (2, 2), (2, 3),
+  (3, 1),
+  (4, 2),
+  (5, 1), (5, 2), (5, 3);
 
 INSERT IGNORE INTO tranches_horaires
   (nom, saison, type_tranche, prix_kw, heure_debut, heure_fin, actif)

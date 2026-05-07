@@ -35,6 +35,7 @@ async function getUserUsinesCodes(userId) {
 
 function getFallbackUsinesByRole(role) {
   const roleToUsines = {
+    superviseur: ["LAC", "ACIERIE", "LAF"],
     superviseur_lac: ["LAC"],
     superviseur_acierie: ["ACIERIE"],
     superviseur_laf: ["LAF"],

@@ -8,8 +8,9 @@ const TRANCHE_WINDOWS = [
 
 const ROLES = {
   ADMIN: "admin",
+  SUPERVISEUR: "superviseur",
   SUPERVISEUR_LAC: "superviseur_lac",
-    SUPERVISEUR_LAF: "superviseur_laf",
+  SUPERVISEUR_LAF: "superviseur_laf",
   SUPERVISEUR_ACIERIE: "superviseur_acierie",
   SUPERVISEUR_ENERGIE: "superviseur_energie",
   USER: "user",
