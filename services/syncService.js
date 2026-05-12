@@ -20,7 +20,18 @@ const SYNC_SOURCE_LOOKBACK_FALLBACK_SECONDS = Math.max(
   SYNC_SOURCE_LOOKBACK_SECONDS,
   Number(process.env.SYNC_SOURCE_LOOKBACK_FALLBACK_SECONDS || 86400)
 );
+const SYNC_REALTIME_LOOKBACK_SECONDS = Math.max(
+  SYNC_SOURCE_LOOKBACK_SECONDS,
+  Number(process.env.SYNC_REALTIME_LOOKBACK_SECONDS || 2592000) // 30 jours par défaut
+);
 const SYNC_LOG_SOURCE = "SENSOR_SYNC";
+
+const SYNC_REALTIME_CAPTEURS = new Set(
+  String(process.env.SYNC_REALTIME_CAPTEURS || "")
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean)
+);
 
 function isEnvTrue(value) {
   const normalized = String(value ?? "").trim().toLowerCase();
@@ -311,8 +322,10 @@ async function readNextValue(capteurId) {
     return;
   }
 
-  const projectedSourceDate = buildProjectedSourceDate();
-  const toleranceMs = Math.max(1000, SYNC_SOURCE_LOOKBACK_SECONDS * 1000);
+  const isRealtime = SYNC_REALTIME_CAPTEURS.has(info.code);
+  const projectedSourceDate = isRealtime ? new Date() : buildProjectedSourceDate();
+  const primaryLookbackSec = isRealtime ? SYNC_REALTIME_LOOKBACK_SECONDS : SYNC_SOURCE_LOOKBACK_SECONDS;
+  const toleranceMs = Math.max(1000, primaryLookbackSec * 1000);
   const lowerBound = new Date(projectedSourceDate.getTime() - toleranceMs);
 
   const pool = await getSourcePool();
@@ -328,12 +341,16 @@ async function readNextValue(capteurId) {
     ORDER BY [date] DESC
   `;
 
-  const runQuery = (expr) => pool
+  const runQuery = (expr, lb) => pool
     .request()
     .input("projectedSourceDate", sql.DateTime, projectedSourceDate)
-    .input("lowerBound", sql.DateTime, lowerBound)
+    .input("lowerBound", sql.DateTime, lb || lowerBound)
     .input("maxPai", sql.Decimal(12, 3), MAX_VALID_PAI)
     .query(buildQuery(expr));
+
+  if (isRealtime) {
+    console.log(`[SYNC REALTIME] ${info.code}: fenetre [${lowerBound.toISOString()} -> ${projectedSourceDate.toISOString()}]`);
+  }
 
   let paExpr = info.paColumn || '[Total_Preal]';
   let result;
@@ -347,12 +364,13 @@ async function readNextValue(capteurId) {
       state.set(capteurId, info);
       result = await runQuery(paExpr);
     } else {
+      if (isRealtime) console.error(`[SYNC REALTIME] ${info.code}: erreur requete:`, err.message);
       throw err;
     }
   }
 
-  // Fallback borne: certaines tables source n'ont pas de point dans la fenetre courte.
-  if (!result.recordset.length && SYNC_SOURCE_LOOKBACK_FALLBACK_SECONDS > SYNC_SOURCE_LOOKBACK_SECONDS) {
+  // Fallback borne: pour les capteurs non-realtime sans point dans la fenetre courte.
+  if (!result.recordset.length && !isRealtime && SYNC_SOURCE_LOOKBACK_FALLBACK_SECONDS > SYNC_SOURCE_LOOKBACK_SECONDS) {
     const fallbackToleranceMs = Math.max(1000, SYNC_SOURCE_LOOKBACK_FALLBACK_SECONDS * 1000);
     const fallbackLowerBound = new Date(projectedSourceDate.getTime() - fallbackToleranceMs);
 
@@ -365,9 +383,16 @@ async function readNextValue(capteurId) {
   }
 
   if (!result.recordset.length) {
+    if (isRealtime) {
+      console.warn(`[SYNC REALTIME] ${info.code}: aucune donnee dans la fenetre de ${Math.round(primaryLookbackSec / 86400)} jours. Verifiez les colonnes [date] et [${paExpr}] dans la table SQL Server.`);
+    }
     info.lastError = `Aucune donnee source <= ${projectedSourceDate.toISOString()}`;
     state.set(capteurId, info);
     return;
+  }
+
+  if (isRealtime) {
+    console.log(`[SYNC REALTIME] ${info.code}: donnee trouvee date_source=${new Date(result.recordset[0].date).toISOString()} colonne=${paExpr} valeur=${result.recordset[0].PA_I} kW`);
   }
 
   const row = result.recordset[0];
