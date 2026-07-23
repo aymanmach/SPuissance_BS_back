@@ -4,7 +4,10 @@ const { ROLES } = require("../config/constants");
 const { socketRequireAuth } = require("../middlewares/auth");
 const { wrapExpressMiddleware } = require("../config/session");
 const { getPaiCouranteGlobale, getPmcCouranteGlobale } = require("../services/powerMetricsService");
-const { verifierEtEnregistrerDepassementAutomatique } = require("../services/depassementService");
+const {
+  verifierEtEnregistrerDepassementAutomatique,
+  verifierDepassementPaiGlobale,
+} = require("../services/depassementService");
 const { ensureDailySensorErrorLogs } = require("../services/logsSystemeService");
 
 const CACHE_MS = Math.max(500, Number(process.env.DASHBOARD_CACHE_MS || 1000));
@@ -12,6 +15,10 @@ const PUSH_INTERVAL_MS = Math.max(500, Number(process.env.DASHBOARD_PUSH_INTERVA
 
 // Ticker de detection independant : toujours 1 seconde, pas lie au cache
 const DETECTION_INTERVAL_MS = 1000;
+
+// Verification periodique de la PAI globale (LAF) par rapport a la puissance
+// souscrite, toutes les 5 minutes.
+const PAI_GLOBALE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
 const DEPASSEMENT_DUREE_MIN_MS = 10 * 60 * 1000; // 10 minutes en millisecondes
 
@@ -188,6 +195,20 @@ function startGlobalTicker(io) {
       console.error("[DEPASSEMENT] Erreur ticker detection:", error.message);
     }
   }, DETECTION_INTERVAL_MS);
+
+  // --- Ticker PAI globale (LAF) : verification toutes les 5 minutes ---
+  setInterval(async () => {
+    try {
+      const result = await verifierDepassementPaiGlobale();
+      if (result.inserted) {
+        console.log(
+          `[DEPASSEMENT PAI_GLOBALE] Depassement enregistre: ${result.avgPai.toFixed(0)} kW > seuil ${result.seuil} kW`
+        );
+      }
+    } catch (error) {
+      console.error("[DEPASSEMENT PAI_GLOBALE] Erreur verification 5min:", error.message);
+    }
+  }, PAI_GLOBALE_CHECK_INTERVAL_MS);
 
   // --- Ticker 2 : push dashboard vers les clients (utilise le cache) ---
   setInterval(async () => {

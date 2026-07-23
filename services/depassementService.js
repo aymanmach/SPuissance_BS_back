@@ -1,4 +1,5 @@
 const db = require("../config/db");
+const { detectTrancheByDate } = require("./trancheService");
 
 const TRANCHE_CACHE_TTL_MS = 60 * 1000;
 let trancheCache = {
@@ -896,6 +897,81 @@ async function getPaiGlobaleMaxParTranche(debut, fin) {
   }));
 }
 
+const PAI_GLOBALE_CHECK_WINDOW_MS = 5 * 60 * 1000;
+
+function getSeuilForTranche(capteur, tranche) {
+  if (tranche === "HC") return Number(capteur.puissance_souscrite_hc || 0);
+  if (tranche === "HPO") return Number(capteur.puissance_souscrite_hpo || 0);
+  return Number(capteur.puissance_souscrite_hp || 0);
+}
+
+// Verification periodique (toutes les 5 min, cf. websocket/realtime.js) : la
+// PAI globale (moyenne sur les 5 dernieres minutes) est-elle toujours sous la
+// puissance souscrite, ou l'a-t-on depassee ?
+async function verifierDepassementPaiGlobale() {
+  const [[capteur]] = await db.query(
+    `SELECT id, usine_id, puissance_souscrite_hc, puissance_souscrite_hp, puissance_souscrite_hpo
+     FROM capteurs
+     WHERE code = 'PAI_GLOBALE' AND actif = TRUE
+     LIMIT 1`
+  );
+
+  if (!capteur) {
+    return { inserted: false, reason: "capteur-absent" };
+  }
+
+  const fin = new Date();
+  const debut = new Date(fin.getTime() - PAI_GLOBALE_CHECK_WINDOW_MS);
+  const tranche = detectTrancheByDate(fin);
+
+  const [[stats]] = await db.query(
+    `SELECT AVG(pa_i) AS avg_pa_i, COUNT(*) AS nb
+     FROM mesures
+     WHERE capteur_id = ?
+       AND date BETWEEN ? AND ?`,
+    [capteur.id, debut, fin]
+  );
+
+  if (!stats?.nb) {
+    return { inserted: false, reason: "no-data" };
+  }
+
+  const avgPai = Number(stats.avg_pa_i || 0);
+  const seuil = getSeuilForTranche(capteur, tranche);
+
+  if (!seuil || avgPai <= seuil) {
+    return { inserted: false, reason: "below-threshold", avgPai, seuil };
+  }
+
+  const [existing] = await db.query(
+    `SELECT id FROM depassements WHERE capteur_id = ? AND date >= ? LIMIT 1`,
+    [capteur.id, debut]
+  );
+
+  if (existing.length) {
+    return { inserted: false, reason: "already-recorded" };
+  }
+
+  const [result] = await db.query(
+    `INSERT INTO depassements
+       (capteur_id, usine_id, date, tranche_horaire, pa_i_kw, pmc_kw, seuil_kw, ecart_kw, description)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      capteur.id,
+      capteur.usine_id,
+      fin,
+      tranche,
+      avgPai,
+      avgPai,
+      seuil,
+      avgPai - seuil,
+      `AUTO PAI_GLOBALE | verif 5min | ${debut.toISOString()} -> ${fin.toISOString()}`,
+    ]
+  );
+
+  return { inserted: true, id: result.insertId, avgPai, seuil };
+}
+
 module.exports = {
   invalidateTranchesCache,
   getDepassementsSynthese,
@@ -906,6 +982,7 @@ module.exports = {
   getDepassementsStatistiques,
   getDepassementsMaxParTranche,
   getPaiGlobaleMaxParTranche,
+  verifierDepassementPaiGlobale,
   createDepassementManual,
   updateDepassementManual,
   deleteDepassementManual,
