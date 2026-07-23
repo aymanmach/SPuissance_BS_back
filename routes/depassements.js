@@ -9,12 +9,17 @@ const {
   getDepassementsPivot,
   getDepassementsStatistiques,
   getDepassementsMaxParTranche,
+  getPmcMaxParTranche,
   createDepassementManual,
   updateDepassementManual,
   deleteDepassementManual,
 } = require("../services/depassementService");
 
 const router = express.Router();
+
+function isLafOnlyScope(usines) {
+  return usines.length === 1 && usines[0] === "LAF";
+}
 
 function getAllowedUsinesForDepassements(req) {
   const role = String(req.session?.user?.role || "");
@@ -203,7 +208,9 @@ router.get(
       return res.status(scope.status).json({ message: scope.message });
     }
 
-    const rows = await getDepassementsMaxParTranche(debut, fin, scope.usines);
+    const rows = isLafOnlyScope(scope.usines)
+      ? await getPmcMaxParTranche(debut, fin, scope.usines)
+      : await getDepassementsMaxParTranche(debut, fin, scope.usines);
     res.json(rows);
   })
 );

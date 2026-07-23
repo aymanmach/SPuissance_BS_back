@@ -1,4 +1,5 @@
 const db = require("../config/db");
+const { getPmcEvolutionGlobale } = require("./powerMetricsService");
 
 const TRANCHE_CACHE_TTL_MS = 60 * 1000;
 let trancheCache = {
@@ -869,6 +870,35 @@ async function getDepassementsMaxParTranche(debut, fin, allowedUsines = []) {
   }));
 }
 
+// Variante basee sur la serie continue de PMC (mesures), au lieu des seuls
+// evenements de depassement enregistres: sinon un jour sans depassement
+// affiche un max a 0 alors que l'installation a bien tourne.
+async function getPmcMaxParTranche(debut, fin, allowedUsines = []) {
+  const rows = await getPmcEvolutionGlobale(debut, fin, allowedUsines);
+
+  const stats = new Map();
+  for (const row of rows) {
+    const tranche = row.tranche_horaire;
+    if (!["HC", "HP", "HPO"].includes(tranche)) continue;
+
+    const entry = stats.get(tranche) || { max: 0, sum: 0, count: 0 };
+    const pmcKw = Number(row.pmc_kw || 0);
+    entry.max = Math.max(entry.max, pmcKw);
+    entry.sum += pmcKw;
+    entry.count += 1;
+    stats.set(tranche, entry);
+  }
+
+  return [...stats.entries()]
+    .map(([tranche_horaire, entry]) => ({
+      tranche_horaire,
+      max_pa_i_kw: entry.max,
+      avg_pa_i_kw: entry.count ? entry.sum / entry.count : 0,
+      points_count: entry.count,
+    }))
+    .sort((a, b) => a.tranche_horaire.localeCompare(b.tranche_horaire));
+}
+
 module.exports = {
   invalidateTranchesCache,
   getDepassementsSynthese,
@@ -878,6 +908,7 @@ module.exports = {
   getDepassementsPivot,
   getDepassementsStatistiques,
   getDepassementsMaxParTranche,
+  getPmcMaxParTranche,
   createDepassementManual,
   updateDepassementManual,
   deleteDepassementManual,
