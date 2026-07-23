@@ -30,6 +30,7 @@ const SYNC_REALTIME_LOOKBACK_SECONDS = Math.max(
   Number(process.env.SYNC_REALTIME_LOOKBACK_SECONDS || 2592000) // 30 jours par défaut
 );
 const SYNC_LOG_SOURCE = "SENSOR_SYNC";
+const GLOBAL_PAI_CODE = "PAI_GLOBALE";
 
 const SYNC_REALTIME_CAPTEURS = new Set(
   String(process.env.SYNC_REALTIME_CAPTEURS || "")
@@ -206,7 +207,8 @@ async function initSync() {
     const normalizedCode = normalizeCapteurCode(capteur.code);
     const depart = departsByCapteurId.get(Number(capteur.id));
     const isFormula = Boolean(depart);
-    const tableSource = isFormula ? null : resolveSourceTableForCapteur(capteur);
+    const isGlobalPai = normalizedCode === GLOBAL_PAI_CODE;
+    const tableSource = isFormula || isGlobalPai ? null : resolveSourceTableForCapteur(capteur);
     if (tableSource) {
       console.log(
         `[SYNC] Capteur ${normalizedCode} -> table source ${tableSource}${capteur.table_source ? " (capteurs.table_source)" : " (mapping/fallback)"}`
@@ -215,12 +217,15 @@ async function initSync() {
       console.log(
         `[SYNC] Capteur ${normalizedCode} -> depart calcule (${depart.parts.map((p) => `${p.operation}${p.table}`).join(" ")})`
       );
+    } else if (isGlobalPai) {
+      console.log(`[SYNC] Capteur ${normalizedCode} -> PAI globale (A127_MC02, echantillonnage 1s)`);
     }
     state.set(Number(capteur.id), {
       capteurId: Number(capteur.id),
       code: normalizedCode || String(capteur.code || ""),
       tableSource,
       isFormula,
+      isGlobalPai,
       sousDeparts: isFormula ? depart.parts : null,
       frequenceSecondes: Math.max(1, Number(capteur.frequence_secondes || 60)),
       cursor: buildProjectedSourceDate(),
@@ -237,7 +242,7 @@ async function initSync() {
   }
 
   for (const [capteurId, info] of state.entries()) {
-    if (info.isFormula) {
+    if (info.isFormula || info.isGlobalPai) {
       startLoopForCapteur(capteurId);
       continue;
     }
@@ -382,6 +387,50 @@ async function readNextFormulaValue(capteurId) {
   state.set(capteurId, info);
 }
 
+async function readNextGlobalPaiValue(capteurId) {
+  const info = state.get(capteurId);
+  if (!info || info.done) {
+    return;
+  }
+
+  const pool = await getSourcePool();
+  const result = await pool.request().query(`
+    SELECT TOP 1 [date], Convert(int, PA_E+PA_I) AS PA
+    FROM [172.20.151.20].[ENERGIE].[dbo].[A127_MC02]
+    WHERE PA_E IS NOT NULL AND PA_I IS NOT NULL
+    ORDER BY [date] DESC
+  `);
+
+  if (!result.recordset.length) {
+    info.lastError = "Aucune donnee A127_MC02";
+    state.set(capteurId, info);
+    return;
+  }
+
+  const row = result.recordset[0];
+  const rowDate = new Date(row.date);
+  const sourceDateKey = Number.isNaN(rowDate.getTime()) ? null : rowDate.toISOString();
+
+  if (sourceDateKey && info.lastSourceDate && String(info.lastSourceDate) === sourceDateKey) {
+    info.lastError = null;
+    state.set(capteurId, info);
+    return;
+  }
+
+  const mesureDate = new Date();
+  const tranche = detectTrancheByDate(mesureDate);
+
+  info.lastSourceDate = sourceDateKey;
+  info.lastError = null;
+  info.buffer.push([info.capteurId, mesureDate, Number(row.PA), tranche, "OK", "A127_MC02"]);
+
+  if (SYNC_WRITE_THROUGH || info.buffer.length >= BUFFER_SIZE) {
+    await flushBuffer(capteurId);
+  }
+
+  state.set(capteurId, info);
+}
+
 async function readNextValue(capteurId) {
   const info = state.get(capteurId);
   if (!info || info.done) {
@@ -390,6 +439,10 @@ async function readNextValue(capteurId) {
 
   if (info.isFormula) {
     return readNextFormulaValue(capteurId);
+  }
+
+  if (info.isGlobalPai) {
+    return readNextGlobalPaiValue(capteurId);
   }
 
   const isRealtime = SYNC_REALTIME_CAPTEURS.has(info.code);
@@ -593,13 +646,15 @@ async function reloadSync() {
     const normalizedCode = normalizeCapteurCode(capteur.code);
     const depart = departsByCapteurId.get(capteurId);
     const isFormula = Boolean(depart);
-    const tableSource = isFormula ? null : resolveSourceTableForCapteur(capteur);
+    const isGlobalPai = normalizedCode === GLOBAL_PAI_CODE;
+    const tableSource = isFormula || isGlobalPai ? null : resolveSourceTableForCapteur(capteur);
 
     const info = {
       capteurId,
       code: normalizedCode,
       tableSource,
       isFormula,
+      isGlobalPai,
       sousDeparts: isFormula ? depart.parts : null,
       frequenceSecondes: Math.max(1, Number(capteur.frequence_secondes || 60)),
       cursor: buildProjectedSourceDate(),
@@ -615,10 +670,14 @@ async function reloadSync() {
     };
     state.set(capteurId, info);
 
-    if (isFormula) {
+    if (isFormula || isGlobalPai) {
       startLoopForCapteur(capteurId);
       added++;
-      console.log(`[SYNC RELOAD] Capteur ${normalizedCode} -> depart calcule (nouveau)`);
+      console.log(
+        isFormula
+          ? `[SYNC RELOAD] Capteur ${normalizedCode} -> depart calcule (nouveau)`
+          : `[SYNC RELOAD] Capteur ${normalizedCode} -> PAI globale (nouveau)`
+      );
       continue;
     }
 

@@ -9,7 +9,7 @@ const {
   getDepassementsPivot,
   getDepassementsStatistiques,
   getDepassementsMaxParTranche,
-  getPmcMaxParTranche,
+  getPaiGlobaleMaxParTranche,
   createDepassementManual,
   updateDepassementManual,
   deleteDepassementManual,
@@ -209,7 +209,7 @@ router.get(
     }
 
     const rows = isLafOnlyScope(scope.usines)
-      ? await getPmcMaxParTranche(debut, fin, scope.usines)
+      ? await getPaiGlobaleMaxParTranche(debut, fin)
       : await getDepassementsMaxParTranche(debut, fin, scope.usines);
     res.json(rows);
   })

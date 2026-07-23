@@ -1,5 +1,4 @@
 const db = require("../config/db");
-const { getPmcEvolutionGlobale } = require("./powerMetricsService");
 
 const TRANCHE_CACHE_TTL_MS = 60 * 1000;
 let trancheCache = {
@@ -870,33 +869,31 @@ async function getDepassementsMaxParTranche(debut, fin, allowedUsines = []) {
   }));
 }
 
-// Variante basee sur la serie continue de PMC (mesures), au lieu des seuls
-// evenements de depassement enregistres: sinon un jour sans depassement
-// affiche un max a 0 alors que l'installation a bien tourne.
-async function getPmcMaxParTranche(debut, fin, allowedUsines = []) {
-  const rows = await getPmcEvolutionGlobale(debut, fin, allowedUsines);
+// Max/moyenne de la PAI globale (meme source que la card Puissance Moyenne
+// Cumulee: capteur PAI_GLOBALE, echantillonne chaque seconde depuis A127_MC02),
+// pour un vrai max instantane par tranche (pas une moyenne qui lisse les pics).
+async function getPaiGlobaleMaxParTranche(debut, fin) {
+  const [rows] = await db.query(
+    `SELECT m.tranche_horaire,
+            MAX(m.pa_i) AS max_pa_i_kw,
+            AVG(m.pa_i) AS avg_pa_i_kw,
+            COUNT(*) AS points_count
+     FROM mesures m
+     JOIN capteurs c ON c.id = m.capteur_id
+     WHERE c.code = 'PAI_GLOBALE'
+       AND m.date BETWEEN ? AND ?
+       AND m.tranche_horaire IN ('HC', 'HP', 'HPO')
+     GROUP BY m.tranche_horaire
+     ORDER BY m.tranche_horaire ASC`,
+    [debut, fin]
+  );
 
-  const stats = new Map();
-  for (const row of rows) {
-    const tranche = row.tranche_horaire;
-    if (!["HC", "HP", "HPO"].includes(tranche)) continue;
-
-    const entry = stats.get(tranche) || { max: 0, sum: 0, count: 0 };
-    const pmcKw = Number(row.pmc_kw || 0);
-    entry.max = Math.max(entry.max, pmcKw);
-    entry.sum += pmcKw;
-    entry.count += 1;
-    stats.set(tranche, entry);
-  }
-
-  return [...stats.entries()]
-    .map(([tranche_horaire, entry]) => ({
-      tranche_horaire,
-      max_pa_i_kw: entry.max,
-      avg_pa_i_kw: entry.count ? entry.sum / entry.count : 0,
-      points_count: entry.count,
-    }))
-    .sort((a, b) => a.tranche_horaire.localeCompare(b.tranche_horaire));
+  return rows.map((row) => ({
+    tranche_horaire: row.tranche_horaire,
+    max_pa_i_kw: Number(row.max_pa_i_kw || 0),
+    avg_pa_i_kw: Number(row.avg_pa_i_kw || 0),
+    points_count: Number(row.points_count || 0),
+  }));
 }
 
 module.exports = {
@@ -908,7 +905,7 @@ module.exports = {
   getDepassementsPivot,
   getDepassementsStatistiques,
   getDepassementsMaxParTranche,
-  getPmcMaxParTranche,
+  getPaiGlobaleMaxParTranche,
   createDepassementManual,
   updateDepassementManual,
   deleteDepassementManual,
