@@ -89,6 +89,20 @@ ALTER TABLE capteurs
   ADD COLUMN IF NOT EXISTS last_maintenance_at DATETIME NULL,
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
 
+-- Un capteur "depart" peut etre calcule a partir de plusieurs tables source
+-- SQL Server combinees par + ou - (ex: LGA = A128 - A15 - A16 - A17 - A18)
+CREATE TABLE IF NOT EXISTS capteur_sous_departs (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  capteur_id INT NOT NULL,
+  table_source VARCHAR(50) NOT NULL,
+  operation ENUM('+','-') NOT NULL DEFAULT '+',
+  ordre TINYINT NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_sous_depart_capteur FOREIGN KEY (capteur_id) REFERENCES capteurs(id) ON DELETE CASCADE,
+  UNIQUE KEY uq_capteur_ordre (capteur_id, ordre),
+  INDEX idx_sous_depart_capteur (capteur_id)
+);
+
 CREATE TABLE IF NOT EXISTS tranches_horaires (
   id INT PRIMARY KEY AUTO_INCREMENT,
   nom VARCHAR(120) NOT NULL,

@@ -8,9 +8,19 @@ const {
   getPmcEvolutionCurrentWindow,
   getPmcEvolutionParCapteurCurrentWindow,
 } = require("../services/powerMetricsService");
+const {
+  getDepartsEvolutionGlobale,
+  getDepartsEvolutionParCapteur,
+  getDepartsEvolutionCurrentWindow,
+  getDepartsEvolutionParCapteurCurrentWindow,
+} = require("../services/departsPrincipauxService");
 
 const router = express.Router();
 const MAX_EVOLUTION_RANGE_DAYS = 31;
+
+function isLafOnlyScope(usines) {
+  return usines.length === 1 && usines[0] === "LAF";
+}
 
 function getAllowedUsinesForMetrics(req) {
   const role = String(req.session?.user?.role || "");
@@ -93,14 +103,18 @@ router.get(
         return res.status(400).json({ message: validation.message });
       }
 
-      const rows = await getPmcEvolutionGlobale(debut, fin, scope.usines);
+      const rows = isLafOnlyScope(scope.usines)
+        ? await getDepartsEvolutionGlobale(debut, fin)
+        : await getPmcEvolutionGlobale(debut, fin, scope.usines);
       return res.json(rows);
     }
 
     const rawLimit = Number(req.query.limit || 600);
     const limit = Math.max(10, Math.min(rawLimit, 1200));
 
-    const rows = await getPmcEvolutionCurrentWindow(limit, scope.usines);
+    const rows = isLafOnlyScope(scope.usines)
+      ? await getDepartsEvolutionCurrentWindow()
+      : await getPmcEvolutionCurrentWindow(limit, scope.usines);
     res.json(rows);
   })
 );
@@ -125,14 +139,18 @@ router.get(
         return res.status(400).json({ message: validation.message });
       }
 
-      const rows = await getPmcEvolutionParCapteur(debut, fin, scope.usines);
+      const rows = isLafOnlyScope(scope.usines)
+        ? await getDepartsEvolutionParCapteur(debut, fin)
+        : await getPmcEvolutionParCapteur(debut, fin, scope.usines);
       return res.json(rows);
     }
 
     const rawLimit = Number(req.query.limit || 120);
     const limit = Math.max(10, Math.min(rawLimit, 300));
 
-    const rows = await getPmcEvolutionParCapteurCurrentWindow(limit, scope.usines);
+    const rows = isLafOnlyScope(scope.usines)
+      ? await getDepartsEvolutionParCapteurCurrentWindow()
+      : await getPmcEvolutionParCapteurCurrentWindow(limit, scope.usines);
     res.json(rows);
   })
 );

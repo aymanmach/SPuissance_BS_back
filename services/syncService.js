@@ -1,6 +1,11 @@
 const { getSourcePool, closeSourcePool, sql } = require("../config/sourceDb");
 const db = require("../config/db");
 const { detectTrancheByDate } = require("./trancheService");
+const {
+  getDepartsDefinitions,
+  getLatestTotalPrealByTable,
+  computeDepartKw,
+} = require("./departsPrincipauxService");
 
 const SYNC_START_DATE = process.env.SYNC_START_DATE || "2026-01-01 01:00:00";
 const BUFFER_SIZE = Math.max(1, Number(process.env.SYNC_BUFFER_SIZE || 100));
@@ -194,18 +199,29 @@ async function initSync() {
     return;
   }
 
+  const departsDefinitions = await getDepartsDefinitions();
+  const departsByCapteurId = new Map(departsDefinitions.map((d) => [Number(d.capteurId), d]));
+
   for (const capteur of capteurs) {
     const normalizedCode = normalizeCapteurCode(capteur.code);
-    const tableSource = resolveSourceTableForCapteur(capteur);
+    const depart = departsByCapteurId.get(Number(capteur.id));
+    const isFormula = Boolean(depart);
+    const tableSource = isFormula ? null : resolveSourceTableForCapteur(capteur);
     if (tableSource) {
       console.log(
         `[SYNC] Capteur ${normalizedCode} -> table source ${tableSource}${capteur.table_source ? " (capteurs.table_source)" : " (mapping/fallback)"}`
+      );
+    } else if (isFormula) {
+      console.log(
+        `[SYNC] Capteur ${normalizedCode} -> depart calcule (${depart.parts.map((p) => `${p.operation}${p.table}`).join(" ")})`
       );
     }
     state.set(Number(capteur.id), {
       capteurId: Number(capteur.id),
       code: normalizedCode || String(capteur.code || ""),
       tableSource,
+      isFormula,
+      sousDeparts: isFormula ? depart.parts : null,
       frequenceSecondes: Math.max(1, Number(capteur.frequence_secondes || 60)),
       cursor: buildProjectedSourceDate(),
       lastSourceDate: null,
@@ -221,6 +237,11 @@ async function initSync() {
   }
 
   for (const [capteurId, info] of state.entries()) {
+    if (info.isFormula) {
+      startLoopForCapteur(capteurId);
+      continue;
+    }
+
     if (!info.tableSource) {
       info.lastError = `Table source manquante pour code ${info.code}`;
       state.set(capteurId, info);
@@ -316,10 +337,59 @@ function startLoopForCapteur(capteurId) {
   state.set(capteurId, info);
 }
 
+async function readNextFormulaValue(capteurId) {
+  const info = state.get(capteurId);
+  if (!info || info.done) {
+    return;
+  }
+
+  const uniqueTables = [...new Set(info.sousDeparts.map((part) => part.table))];
+  const valuesByTable = await getLatestTotalPrealByTable(uniqueTables);
+
+  const kw = computeDepartKw({ parts: info.sousDeparts }, valuesByTable);
+  if (kw === null) {
+    info.lastError = `Donnees source manquantes pour le depart ${info.code}`;
+    state.set(capteurId, info);
+    return;
+  }
+
+  let latestSourceDate = null;
+  for (const table of uniqueTables) {
+    const rowDate = valuesByTable[table]?.date ? new Date(valuesByTable[table].date) : null;
+    if (rowDate && (!latestSourceDate || rowDate > latestSourceDate)) {
+      latestSourceDate = rowDate;
+    }
+  }
+  const sourceDateKey = latestSourceDate ? latestSourceDate.toISOString() : null;
+
+  if (sourceDateKey && info.lastSourceDate && String(info.lastSourceDate) === sourceDateKey) {
+    info.lastError = null;
+    state.set(capteurId, info);
+    return;
+  }
+
+  const mesureDate = new Date();
+  const tranche = detectTrancheByDate(mesureDate);
+
+  info.lastSourceDate = sourceDateKey;
+  info.lastError = null;
+  info.buffer.push([info.capteurId, mesureDate, kw, tranche, "OK", uniqueTables.join("+")]);
+
+  if (SYNC_WRITE_THROUGH || info.buffer.length >= BUFFER_SIZE) {
+    await flushBuffer(capteurId);
+  }
+
+  state.set(capteurId, info);
+}
+
 async function readNextValue(capteurId) {
   const info = state.get(capteurId);
   if (!info || info.done) {
     return;
+  }
+
+  if (info.isFormula) {
+    return readNextFormulaValue(capteurId);
   }
 
   const isRealtime = SYNC_REALTIME_CAPTEURS.has(info.code);
@@ -512,18 +582,25 @@ async function reloadSync() {
      ORDER BY id ASC`
   );
 
+  const departsDefinitions = await getDepartsDefinitions();
+  const departsByCapteurId = new Map(departsDefinitions.map((d) => [Number(d.capteurId), d]));
+
   let added = 0;
   for (const capteur of capteurs) {
     const capteurId = Number(capteur.id);
     if (state.has(capteurId)) continue;
 
     const normalizedCode = normalizeCapteurCode(capteur.code);
-    const tableSource = resolveSourceTableForCapteur(capteur);
+    const depart = departsByCapteurId.get(capteurId);
+    const isFormula = Boolean(depart);
+    const tableSource = isFormula ? null : resolveSourceTableForCapteur(capteur);
 
     const info = {
       capteurId,
       code: normalizedCode,
       tableSource,
+      isFormula,
+      sousDeparts: isFormula ? depart.parts : null,
       frequenceSecondes: Math.max(1, Number(capteur.frequence_secondes || 60)),
       cursor: buildProjectedSourceDate(),
       lastSourceDate: null,
@@ -537,6 +614,13 @@ async function reloadSync() {
       consecutiveErrors: 0,
     };
     state.set(capteurId, info);
+
+    if (isFormula) {
+      startLoopForCapteur(capteurId);
+      added++;
+      console.log(`[SYNC RELOAD] Capteur ${normalizedCode} -> depart calcule (nouveau)`);
+      continue;
+    }
 
     if (!tableSource) {
       const s = state.get(capteurId);

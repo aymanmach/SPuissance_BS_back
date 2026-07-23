@@ -12,12 +12,16 @@ const seuilsRoutes = require("./seuils");
 const adminUsersRoutes = require("./adminUsers");
 const adminTranchesRoutes = require("./adminTranches");
 const adminCapteursRoutes = require("./adminCapteurs");
+const consommationReelleRoutes = require("./consommationReelle");
+const departsPrincipauxRoutes = require("./departsPrincipaux");
 
 const router = express.Router();
 
 router.use("/auth", authRoutes);
 router.use("/pai", paiRoutes);
 router.use("/pmc", pmcRoutes);
+router.use("/consommation-reelle", consommationReelleRoutes);
+router.use("/departs-principaux", departsPrincipauxRoutes);
 router.use("/capteurs", capteursRoutes);
 router.use("/depassements", depassementsRoutes);
 router.use("/tranches", tranchesRoutes);
